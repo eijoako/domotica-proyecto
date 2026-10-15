@@ -13,6 +13,8 @@ WebServer server(80);
 Storage storage;
 RfidReader rfid;
 AttendanceManager attendance(storage);
+String pendingWriteCardId;
+String adminMessage;
 
 void sendStatus() {
   JsonDocument doc;
@@ -32,6 +34,52 @@ void setClock() {
   server.send(204);
 }
 
+void sendJson(bool ok, const String& message) {
+  JsonDocument doc;
+  doc[ok ? "message" : "error"] = message;
+  String body; serializeJson(doc, body);
+  server.send(ok ? 200 : 400, "application/json", body);
+}
+
+Person personFromRequest(bool teacher) {
+  Person person;
+  person.id = server.arg("id"); person.name = server.arg("name"); person.cardId = server.arg("cardId");
+  person.active = server.arg("active") == "true";
+  if (teacher) person.classId = server.arg("classId");
+  return person;
+}
+
+void saveStudent() { String error; const bool ok = storage.upsertStudent(personFromRequest(false), error); sendJson(ok, ok ? "Estudiante guardado" : error); }
+void saveTeacher() { String error; const bool ok = storage.upsertTeacher(personFromRequest(true), error); sendJson(ok, ok ? "Docente guardado" : error); }
+void saveClass() { String error; ClassInfo info = {server.arg("id"), server.arg("name")}; const bool ok = storage.upsertClass(info, error); sendJson(ok, ok ? "Clase guardada" : error); }
+
+void deleteEntity() {
+  const String type = server.arg("type"), id = server.arg("id"); String error; bool ok = false;
+  if (type == "student") ok = storage.removeStudent(id, error);
+  else if (type == "teacher") ok = storage.removeTeacher(id, error);
+  else if (type == "class") ok = storage.removeClass(id, error);
+  else error = "Tipo inválido";
+  sendJson(ok, ok ? "Registro borrado" : error);
+}
+
+void armCardWrite() {
+  const String cardId = server.arg("cardId");
+  if (cardId.isEmpty() || cardId.length() > 16) { sendJson(false, "Card ID inválido"); return; }
+  if (!storage.findStudent(cardId) && !storage.findTeacher(cardId)) { sendJson(false, "Primero guarde una persona activa con este Card ID"); return; }
+  pendingWriteCardId = cardId;
+  adminMessage = "Acerque una tarjeta para escribir " + cardId;
+  sendJson(true, adminMessage);
+}
+
+void sendAdminData() {
+  JsonDocument doc;
+  storage.writeAdminData(doc);
+  doc["pendingCardId"] = pendingWriteCardId;
+  doc["adminMessage"] = adminMessage;
+  String body; serializeJson(doc, body);
+  server.send(200, "application/json", body);
+}
+
 void setup() {
   Serial.begin(115200);
   setenv("TZ", "UTC0", 1);
@@ -46,8 +94,15 @@ void setup() {
   server.on("/", HTTP_GET, [] {
     server.send_P(200, "text/html; charset=utf-8", INDEX_HTML);
   });
+  server.on("/admin", HTTP_GET, [] { server.send_P(200, "text/html; charset=utf-8", ADMIN_HTML); });
   server.on("/api/status", HTTP_GET, sendStatus);
   server.on("/api/time", HTTP_POST, setClock);
+  server.on("/api/admin/data", HTTP_GET, sendAdminData);
+  server.on("/api/admin/student", HTTP_POST, saveStudent);
+  server.on("/api/admin/teacher", HTTP_POST, saveTeacher);
+  server.on("/api/admin/class", HTTP_POST, saveClass);
+  server.on("/api/admin/delete", HTTP_POST, deleteEntity);
+  server.on("/api/admin/write-card", HTTP_POST, armCardWrite);
   server.onNotFound([] {
     server.send(404, "application/json", "{\"error\":\"not found\"}");
   });
@@ -60,6 +115,16 @@ void setup() {
 void loop() {
   server.handleClient();
   attendance.tick();
+
+  if (!pendingWriteCardId.isEmpty()) {
+    String message;
+    if (rfid.writeCardId(pendingWriteCardId, message)) {
+      adminMessage = message;
+      Serial.println(message);
+      pendingWriteCardId = "";
+    }
+    return;
+  }
 
   String cardId;
   if (rfid.readCardId(cardId)) {

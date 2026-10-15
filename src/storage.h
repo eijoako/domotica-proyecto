@@ -1,5 +1,7 @@
 #pragma once
 #include <Arduino.h>
+#include <ArduinoJson.h>
+#include "config.h"
 #include "models.h"
 
 class Storage {
@@ -9,6 +11,13 @@ class Storage {
   const Person* findStudent(const String& cardId) const;
   const Person* findTeacher(const String& cardId) const;
   const ClassInfo* findClass(const String& id) const;
+  bool upsertStudent(const Person& person, String& error);
+  bool upsertTeacher(const Person& person, String& error);
+  bool upsertClass(const ClassInfo& classInfo, String& error);
+  bool removeStudent(const String& id, String& error);
+  bool removeTeacher(const String& id, String& error);
+  bool removeClass(const String& id, String& error);
+  void writeAdminData(JsonDocument& doc) const;
   bool saveSession(const String& date, const String& id, const String& classId,
                    const String& teacherId, const String& openedAt,
                    const String& closedAt, const char* closeReason,
@@ -19,6 +28,11 @@ class Storage {
  private:
   bool ensureSeedData();
   bool writeAtomically(const String& path, const String& body);
+  bool saveStudents();
+  bool saveTeachers();
+  bool saveClasses();
+  bool cardAvailable(const String& cardId, const String& ownerId, bool teacher) const;
+  static bool validId(const String& value, size_t maximum);
   Person students_[MAX_STUDENTS];
   Person teachers_[20];
   ClassInfo classes_[20];

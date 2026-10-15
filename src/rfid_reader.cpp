@@ -20,3 +20,17 @@ bool RfidReader::readCardId(String& cardId) {
   return !cardId.isEmpty();
 }
 
+bool RfidReader::writeCardId(const String& cardId, String& message) {
+  if (!reader.PICC_IsNewCardPresent() || !reader.PICC_ReadCardSerial()) return false;
+  if (cardId.isEmpty() || cardId.length() > 16) { message = "CardId inválido (máximo 16 caracteres)"; reader.PICC_HaltA(); return true; }
+  MFRC522::MIFARE_Key key; for (byte i = 0; i < 6; ++i) key.keyByte[i] = 0xFF;
+  const byte block = 4; // Permitted data block in sector 1.
+  byte buffer[16] = {0};
+  for (size_t i = 0; i < cardId.length(); ++i) buffer[i] = static_cast<byte>(cardId[i]);
+  const auto auth = reader.PCD_Authenticate(MFRC522::PICC_CMD_MF_AUTH_KEY_A, block, &key, &(reader.uid));
+  const auto status = auth == MFRC522::STATUS_OK ? reader.MIFARE_Write(block, buffer, 16) : MFRC522::STATUS_ERROR;
+  reader.PICC_HaltA(); reader.PCD_StopCrypto1();
+  message = status == MFRC522::STATUS_OK ? "Tarjeta configurada correctamente" : "No se pudo escribir el bloque 4";
+  return true;
+}
+

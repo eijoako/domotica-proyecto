@@ -81,6 +81,82 @@ const ClassInfo* Storage::findClass(const String& id) const {
   return nullptr;
 }
 
+bool Storage::validId(const String& value, size_t maximum) {
+  return !value.isEmpty() && value.length() <= maximum;
+}
+
+bool Storage::cardAvailable(const String& cardId, const String& ownerId, bool teacher) const {
+  if (cardId.isEmpty()) return true;
+  for (size_t i = 0; i < studentCount_; ++i)
+    if (students_[i].active && students_[i].cardId == cardId && (teacher || students_[i].id != ownerId)) return false;
+  for (size_t i = 0; i < teacherCount_; ++i)
+    if (teachers_[i].active && teachers_[i].cardId == cardId && (!teacher || teachers_[i].id != ownerId)) return false;
+  return true;
+}
+
+bool Storage::saveStudents() {
+  JsonDocument doc; JsonArray rows = doc.to<JsonArray>();
+  for (size_t i = 0; i < studentCount_; ++i) { JsonObject row = rows.add<JsonObject>(); row["id"] = students_[i].id; row["name"] = students_[i].name; row["cardId"] = students_[i].cardId; row["active"] = students_[i].active; }
+  String out; serializeJsonPretty(doc, out); return writeAtomically("/data/students.json", out);
+}
+bool Storage::saveTeachers() {
+  JsonDocument doc; JsonArray rows = doc.to<JsonArray>();
+  for (size_t i = 0; i < teacherCount_; ++i) { JsonObject row = rows.add<JsonObject>(); row["id"] = teachers_[i].id; row["name"] = teachers_[i].name; row["cardId"] = teachers_[i].cardId; row["classId"] = teachers_[i].classId; row["active"] = teachers_[i].active; }
+  String out; serializeJsonPretty(doc, out); return writeAtomically("/data/teachers.json", out);
+}
+bool Storage::saveClasses() {
+  JsonDocument doc; JsonArray rows = doc.to<JsonArray>();
+  for (size_t i = 0; i < classCount_; ++i) { JsonObject row = rows.add<JsonObject>(); row["id"] = classes_[i].id; row["name"] = classes_[i].name; }
+  String out; serializeJsonPretty(doc, out); return writeAtomically("/data/classes.json", out);
+}
+
+bool Storage::upsertStudent(const Person& person, String& error) {
+  if (!validId(person.id, 24) || !validId(person.name, 64) || person.cardId.length() > 16) { error = "Datos de estudiante inválidos"; return false; }
+  if (person.active && !cardAvailable(person.cardId, person.id, false)) { error = "La tarjeta ya está asignada a una persona activa"; return false; }
+  for (size_t i = 0; i < studentCount_; ++i) if (students_[i].id == person.id) { Person old = students_[i]; students_[i] = person; if (saveStudents()) return true; students_[i] = old; error = "No se pudo guardar LittleFS"; return false; }
+  if (studentCount_ >= MAX_STUDENTS) { error = "Límite de estudiantes alcanzado"; return false; }
+  students_[studentCount_++] = person; if (saveStudents()) return true; --studentCount_; error = "No se pudo guardar LittleFS"; return false;
+}
+
+bool Storage::upsertTeacher(const Person& person, String& error) {
+  if (!validId(person.id, 24) || !validId(person.name, 64) || !validId(person.classId, 24) || person.cardId.length() > 16) { error = "Datos de docente inválidos"; return false; }
+  if (!findClass(person.classId)) { error = "La clase indicada no existe"; return false; }
+  if (person.active && !cardAvailable(person.cardId, person.id, true)) { error = "La tarjeta ya está asignada a una persona activa"; return false; }
+  for (size_t i = 0; i < teacherCount_; ++i) if (teachers_[i].id == person.id) { Person old = teachers_[i]; teachers_[i] = person; if (saveTeachers()) return true; teachers_[i] = old; error = "No se pudo guardar LittleFS"; return false; }
+  if (teacherCount_ >= 20) { error = "Límite de docentes alcanzado"; return false; }
+  teachers_[teacherCount_++] = person; if (saveTeachers()) return true; --teacherCount_; error = "No se pudo guardar LittleFS"; return false;
+}
+
+bool Storage::upsertClass(const ClassInfo& classInfo, String& error) {
+  if (!validId(classInfo.id, 24) || !validId(classInfo.name, 64)) { error = "Datos de clase inválidos"; return false; }
+  for (size_t i = 0; i < classCount_; ++i) if (classes_[i].id == classInfo.id) { ClassInfo old = classes_[i]; classes_[i] = classInfo; if (saveClasses()) return true; classes_[i] = old; error = "No se pudo guardar LittleFS"; return false; }
+  if (classCount_ >= 20) { error = "Límite de clases alcanzado"; return false; }
+  classes_[classCount_++] = classInfo; if (saveClasses()) return true; --classCount_; error = "No se pudo guardar LittleFS"; return false;
+}
+
+bool Storage::removeStudent(const String& id, String& error) {
+  for (size_t i = 0; i < studentCount_; ++i) if (students_[i].id == id) { Person old = students_[i]; for (size_t j = i + 1; j < studentCount_; ++j) students_[j - 1] = students_[j]; --studentCount_; if (saveStudents()) return true; for (size_t j = studentCount_; j > i; --j) students_[j] = students_[j - 1]; students_[i] = old; ++studentCount_; error = "No se pudo guardar LittleFS"; return false; }
+  error = "Estudiante no encontrado"; return false;
+}
+bool Storage::removeTeacher(const String& id, String& error) {
+  for (size_t i = 0; i < teacherCount_; ++i) if (teachers_[i].id == id) { Person old = teachers_[i]; for (size_t j = i + 1; j < teacherCount_; ++j) teachers_[j - 1] = teachers_[j]; --teacherCount_; if (saveTeachers()) return true; for (size_t j = teacherCount_; j > i; --j) teachers_[j] = teachers_[j - 1]; teachers_[i] = old; ++teacherCount_; error = "No se pudo guardar LittleFS"; return false; }
+  error = "Docente no encontrado"; return false;
+}
+bool Storage::removeClass(const String& id, String& error) {
+  for (size_t i = 0; i < teacherCount_; ++i) if (teachers_[i].classId == id) { error = "No se puede borrar una clase asignada a un docente"; return false; }
+  for (size_t i = 0; i < classCount_; ++i) if (classes_[i].id == id) { ClassInfo old = classes_[i]; for (size_t j = i + 1; j < classCount_; ++j) classes_[j - 1] = classes_[j]; --classCount_; if (saveClasses()) return true; for (size_t j = classCount_; j > i; --j) classes_[j] = classes_[j - 1]; classes_[i] = old; ++classCount_; error = "No se pudo guardar LittleFS"; return false; }
+  error = "Clase no encontrada"; return false;
+}
+
+void Storage::writeAdminData(JsonDocument& doc) const {
+  JsonArray students = doc["students"].to<JsonArray>();
+  for (size_t i = 0; i < studentCount_; ++i) { JsonObject row = students.add<JsonObject>(); row["id"] = students_[i].id; row["name"] = students_[i].name; row["cardId"] = students_[i].cardId; row["active"] = students_[i].active; }
+  JsonArray teachers = doc["teachers"].to<JsonArray>();
+  for (size_t i = 0; i < teacherCount_; ++i) { JsonObject row = teachers.add<JsonObject>(); row["id"] = teachers_[i].id; row["name"] = teachers_[i].name; row["cardId"] = teachers_[i].cardId; row["classId"] = teachers_[i].classId; row["active"] = teachers_[i].active; }
+  JsonArray classes = doc["classes"].to<JsonArray>();
+  for (size_t i = 0; i < classCount_; ++i) { JsonObject row = classes.add<JsonObject>(); row["id"] = classes_[i].id; row["name"] = classes_[i].name; }
+}
+
 bool Storage::saveSession(const String& date, const String& id, const String& classId,
                           const String& teacherId, const String& openedAt,
                           const String& closedAt, const char* closeReason,

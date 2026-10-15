@@ -77,16 +77,27 @@ Si aparece `storage: ERROR`, no debe realizarse una demostración. Se recomienda
 
 ## 5. Preparar las tarjetas
 
-Este programa de asistencia **lee** un `cardId` que ya debe existir en la tarjeta. No usa el UID de fábrica como identidad.
+El proyecto dispone de una pantalla local de administración en `http://192.168.4.1/admin`. Desde allí se pueden crear, actualizar y borrar clases, docentes y estudiantes; los datos quedan guardados en LittleFS. También permite escribir el `cardId` en una tarjeta, por lo que no es necesario usar un programa separado para la demostración.
 
-El programa separado de administración de tarjetas debe utilizarse para escribir el `cardId` en el bloque de datos 4 (sector 1) y para asignarlo a la persona correspondiente. Nunca deben escribirse el bloque 0, los tráileres de sector, las claves ni los bits de acceso.
+La administración no tiene cuentas de usuario: cualquier dispositivo conectado a la red Wi-Fi de la ESP32 puede abrir `/admin`. Por ello, la contraseña de la red debe cambiarse antes de una demostración y la administración debe utilizarse únicamente en un entorno de confianza.
+
+Este programa **lee** un `cardId` guardado en la tarjeta. No usa el UID de fábrica como identidad.
+
+Para configurar una tarjeta desde `/admin`, el público debe seguir este orden:
+
+1. Crear una clase, por ejemplo `3EMS-ECO-A`.
+2. Crear un docente o estudiante activo, con un ID propio y un `Card ID` de hasta 16 caracteres. En el caso de un docente, debe indicarse una clase existente.
+3. En la sección **Escribir una tarjeta**, ingresar ese mismo `Card ID` y pulsar **Preparar escritura**.
+4. Acercar una tarjeta al RC522. La pantalla mostrará si la escritura se realizó correctamente.
+
+El sistema escribe únicamente el bloque de datos 4 (sector 1) usando la clave de demostración predeterminada. Nunca deben escribirse el bloque 0, los tráileres de sector, las claves ni los bits de acceso.
 
 Al iniciarse por primera vez, el programa crea estos datos de ejemplo en LittleFS:
 
 - Profesor: `T1A2B3C4`, clase `3EMS-ECO-A`.
 - Alumno: `A7F3C912`.
 
-Para una prueba real, las asignaciones deben actualizarse mediante el programa de administración. Una misma tarjeta activa no puede estar asignada a dos personas.
+Para una prueba real, las asignaciones deben actualizarse desde la administración local. Una misma tarjeta activa no puede estar asignada a dos personas.
 
 ## 6. Uso de la asistencia, de principio a fin
 
