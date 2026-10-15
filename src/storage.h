@@ -27,6 +27,7 @@ class Storage {
 
  private:
   bool ensureSeedData();
+  bool closeInterruptedSessions();
   bool writeAtomically(const String& path, const String& body);
   bool saveStudents();
   bool saveTeachers();

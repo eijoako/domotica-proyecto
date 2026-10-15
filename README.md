@@ -6,6 +6,8 @@ Este repositorio presenta un prototipo local y sin Internet para registrar asist
 
 Una tarjeta de docente abre una clase durante diez minutos. Durante ese período, cada tarjeta de estudiante activa se registra una sola vez. El ESP32 guarda los datos en su memoria LittleFS, incluso si se reinicia.
 
+Si se reinicia durante una sesión, las lecturas ya guardadas se conservan y la sesión anterior queda marcada como `DEVICE_RESTART`. El equipo vuelve a iniciar sin una clase abierta.
+
 > Este es un proyecto demostrativo para el liceo, no un sistema de seguridad ni de asistencia para toda una institución.
 
 ## 1. Materiales necesarios en el liceo
@@ -75,6 +77,8 @@ En la computadora del liceo, el público debe realizar los siguientes pasos:
 
 Si aparece `storage: ERROR`, no debe realizarse una demostración. Se recomienda revisar que el paquete ESP32 esté actualizado y volver a cargar el programa.
 
+Ante un fallo de montaje de LittleFS en una placa que ya había funcionado, el programa **no formatea la memoria automáticamente**. De ese modo evita borrar el historial por accidente. En ese caso debe revisarse la placa y recuperarse la información antes de borrar o reformatear la memoria.
+
 ## 5. Preparar las tarjetas
 
 El proyecto dispone de una pantalla local de administración en `http://192.168.4.1/admin`. Desde allí se pueden crear, actualizar y borrar clases, docentes y estudiantes; los datos quedan guardados en LittleFS. También permite escribir el `cardId` en una tarjeta, por lo que no es necesario usar un programa separado para la demostración.
@@ -86,9 +90,13 @@ Este programa **lee** un `cardId` guardado en la tarjeta. No usa el UID de fábr
 Para configurar una tarjeta desde `/admin`, el público debe seguir este orden:
 
 1. Crear una clase, por ejemplo `3EMS-ECO-A`.
-2. Crear un docente o estudiante activo, con un ID propio y un `Card ID` de hasta 16 caracteres. En el caso de un docente, debe indicarse una clase existente.
+2. Crear un docente o estudiante activo, con un ID propio y un `Card ID` de hasta 16 caracteres. Los IDs admiten letras sin tildes, números, guiones y guiones bajos; los nombres sí admiten tildes y espacios. En el caso de un docente, debe indicarse una clase existente.
 3. En la sección **Escribir una tarjeta**, ingresar ese mismo `Card ID` y pulsar **Preparar escritura**.
 4. Acercar una tarjeta al RC522. La pantalla mostrará si la escritura se realizó correctamente.
+
+Una tarjeta ya utilizada también puede reescribirse. Tras pulsar **Preparar escritura**, el lector puede despertar la tarjeta aunque haya quedado apoyada desde una lectura anterior. El programa vuelve a leer el bloque 4 y solo confirma la escritura cuando su contenido coincide con el nuevo `Card ID`. Si no se presenta ninguna tarjeta en un minuto, la operación se cancela para que la lectura de asistencia vuelva a funcionar.
+
+Una vez escrita, la tarjeta debe retirarse del lector y acercarse de nuevo para usarla en la asistencia.
 
 El sistema escribe únicamente el bloque de datos 4 (sector 1) usando la clave de demostración predeterminada. Nunca deben escribirse el bloque 0, los tráileres de sector, las claves ni los bits de acceso.
 
@@ -103,7 +111,7 @@ Para una prueba real, las asignaciones deben actualizarse desde la administraci�
 
 1. En un teléfono, buscar la red Wi-Fi creada por la ESP32 (por defecto, `Asistencia-RFID`) e ingresar la contraseña configurada.
 2. Abrir el navegador y visitar `http://192.168.4.1`.
-3. Pulsar **“Sincronizar hora del teléfono”**. Esto proporciona fecha y hora al ESP32 sin necesitar Internet; es obligatorio para guardar el historial diario correctamente.
+3. Pulsar **“Sincronizar hora del teléfono”**. Esto proporciona fecha y hora al ESP32 sin necesitar Internet; es obligatorio para guardar el historial diario correctamente. Los archivos diarios usan la hora de Uruguay (UTC−3).
 4. La pantalla mostrará **CLASE CERRADA**. Debe acercarse una tarjeta de docente registrada al RC522.
 5. La pantalla mostrará la clase abierta, el docente, los presentes y una cuenta regresiva de diez minutos.
 6. Deben acercarse las tarjetas de estudiantes registrados. Cada lectura válida mostrará `Alumno registrado: Nombre` y se guardará inmediatamente en la memoria.

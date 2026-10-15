@@ -3,6 +3,7 @@
 #include <WebServer.h>
 #include <ArduinoJson.h>
 #include <sys/time.h>
+#include <stdlib.h>
 #include "src/config.h"
 #include "src/storage.h"
 #include "src/rfid_reader.h"
@@ -15,6 +16,7 @@ RfidReader rfid;
 AttendanceManager attendance(storage);
 String pendingWriteCardId;
 String adminMessage;
+uint32_t pendingWriteStartedMs = 0;
 
 void sendStatus() {
   JsonDocument doc;
@@ -29,7 +31,14 @@ void setClock() {
     server.send(400, "application/json", "{\"error\":\"epoch required\"}");
     return;
   }
-  timeval tv = {static_cast<time_t>(server.arg("epoch").toInt()), 0};
+  const String value = server.arg("epoch");
+  char* end;
+  const long long epoch = strtoll(value.c_str(), &end, 10);
+  if (end == value.c_str() || *end != '\0' || epoch < 1704067200LL || epoch > 4102444800LL) {
+    server.send(400, "application/json", "{\"error\":\"fecha inválida\"}");
+    return;
+  }
+  timeval tv = {static_cast<time_t>(epoch), 0};
   settimeofday(&tv, nullptr);
   server.send(204);
 }
@@ -67,6 +76,7 @@ void armCardWrite() {
   if (cardId.isEmpty() || cardId.length() > 16) { sendJson(false, "Card ID inválido"); return; }
   if (!storage.findStudent(cardId) && !storage.findTeacher(cardId)) { sendJson(false, "Primero guarde una persona activa con este Card ID"); return; }
   pendingWriteCardId = cardId;
+  pendingWriteStartedMs = millis();
   adminMessage = "Acerque una tarjeta para escribir " + cardId;
   sendJson(true, adminMessage);
 }
@@ -82,7 +92,7 @@ void sendAdminData() {
 
 void setup() {
   Serial.begin(115200);
-  setenv("TZ", "UTC0", 1);
+  setenv("TZ", "UYT3", 1); // Uruguay, UTC-3 (POSIX TZ signs are reversed).
   tzset();
 
   const bool storageOk = storage.begin();
@@ -117,6 +127,11 @@ void loop() {
   attendance.tick();
 
   if (!pendingWriteCardId.isEmpty()) {
+    if (millis() - pendingWriteStartedMs >= 60000) {
+      pendingWriteCardId = "";
+      adminMessage = "Escritura cancelada: tiempo agotado";
+      return;
+    }
     String message;
     if (rfid.writeCardId(pendingWriteCardId, message)) {
       adminMessage = message;

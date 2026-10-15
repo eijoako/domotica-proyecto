@@ -1,6 +1,7 @@
 #include "storage.h"
 #include <ArduinoJson.h>
 #include <LittleFS.h>
+#include <Preferences.h>
 
 bool Storage::writeAtomically(const String& path, const String& body) {
   const String temp = path + ".tmp";
@@ -9,7 +10,8 @@ bool Storage::writeAtomically(const String& path, const String& body) {
   const bool complete = file.print(body) == body.length();
   file.close();
   if (!complete) { LittleFS.remove(temp); return false; }
-  LittleFS.remove(path);
+  // LittleFS replaces an existing destination atomically during rename.
+  // Removing it first left a window where a power loss erased the old data.
   return LittleFS.rename(temp, path);
 }
 
@@ -26,10 +28,55 @@ bool Storage::ensureSeedData() {
 }
 
 bool Storage::begin() {
-  if (!LittleFS.begin(true)) return false;
+  Preferences prefs;
+  if (!prefs.begin("rfid-attend", false)) return false;
+  const bool initialized = prefs.getBool("fs-ready", false);
+  if (!LittleFS.begin(false)) {
+    // Format a new board once. On later boots, a mount failure must not erase
+    // attendance files just because the filesystem is temporarily damaged.
+    if (initialized || !LittleFS.format() || !LittleFS.begin(false)) {
+      prefs.end();
+      return false;
+    }
+  }
+  const bool marked = initialized || prefs.putBool("fs-ready", true) == 1;
+  prefs.end();
+  if (!marked) return false;
   if (!LittleFS.exists("/data")) LittleFS.mkdir("/data");
   if (!LittleFS.exists("/attendances")) LittleFS.mkdir("/attendances");
-  return ensureSeedData() && loadEntities();
+  return ensureSeedData() && loadEntities() && closeInterruptedSessions();
+}
+
+bool Storage::closeInterruptedSessions() {
+  File directory = LittleFS.open("/attendances");
+  if (!directory || !directory.isDirectory()) return false;
+  File file = directory.openNextFile();
+  while (file) {
+    if (!file.isDirectory() && String(file.name()).endsWith(".json")) {
+      const String path = file.path();
+      JsonDocument doc;
+      const auto error = deserializeJson(doc, file);
+      file.close();
+      if (error || !doc["sessions"].is<JsonArray>()) return false;
+      bool changed = false;
+      for (JsonObject session : doc["sessions"].as<JsonArray>()) {
+        if (session["closeReason"].as<String>() == "OPEN") {
+          session["closeReason"] = "DEVICE_RESTART";
+          session["closedAt"] = ""; // Reboot time is unknown until the phone sets the clock.
+          changed = true;
+        }
+      }
+      if (changed) {
+        String output;
+        serializeJsonPretty(doc, output);
+        if (!writeAtomically(path, output)) return false;
+      }
+    } else {
+      file.close();
+    }
+    file = directory.openNextFile();
+  }
+  return true;
 }
 
 bool Storage::loadEntities() {
@@ -69,10 +116,12 @@ bool Storage::loadEntities() {
 }
 
 const Person* Storage::findStudent(const String& cardId) const {
+  if (cardId.isEmpty()) return nullptr;
   for (size_t i = 0; i < studentCount_; ++i) if (students_[i].active && students_[i].cardId == cardId) return &students_[i];
   return nullptr;
 }
 const Person* Storage::findTeacher(const String& cardId) const {
+  if (cardId.isEmpty()) return nullptr;
   for (size_t i = 0; i < teacherCount_; ++i) if (teachers_[i].active && teachers_[i].cardId == cardId) return &teachers_[i];
   return nullptr;
 }
@@ -82,7 +131,13 @@ const ClassInfo* Storage::findClass(const String& id) const {
 }
 
 bool Storage::validId(const String& value, size_t maximum) {
-  return !value.isEmpty() && value.length() <= maximum;
+  if (value.isEmpty() || value.length() > maximum) return false;
+  for (size_t i = 0; i < value.length(); ++i) {
+    const char c = value[i];
+    if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+          (c >= '0' && c <= '9') || c == '_' || c == '-')) return false;
+  }
+  return true;
 }
 
 bool Storage::cardAvailable(const String& cardId, const String& ownerId, bool teacher) const {
@@ -111,7 +166,7 @@ bool Storage::saveClasses() {
 }
 
 bool Storage::upsertStudent(const Person& person, String& error) {
-  if (!validId(person.id, 24) || !validId(person.name, 64) || person.cardId.length() > 16) { error = "Datos de estudiante inválidos"; return false; }
+  if (!validId(person.id, 24) || person.name.isEmpty() || person.name.length() > 64 || (!person.cardId.isEmpty() && !validId(person.cardId, 16))) { error = "Datos de estudiante inválidos"; return false; }
   if (person.active && !cardAvailable(person.cardId, person.id, false)) { error = "La tarjeta ya está asignada a una persona activa"; return false; }
   for (size_t i = 0; i < studentCount_; ++i) if (students_[i].id == person.id) { Person old = students_[i]; students_[i] = person; if (saveStudents()) return true; students_[i] = old; error = "No se pudo guardar LittleFS"; return false; }
   if (studentCount_ >= MAX_STUDENTS) { error = "Límite de estudiantes alcanzado"; return false; }
@@ -119,7 +174,7 @@ bool Storage::upsertStudent(const Person& person, String& error) {
 }
 
 bool Storage::upsertTeacher(const Person& person, String& error) {
-  if (!validId(person.id, 24) || !validId(person.name, 64) || !validId(person.classId, 24) || person.cardId.length() > 16) { error = "Datos de docente inválidos"; return false; }
+  if (!validId(person.id, 24) || person.name.isEmpty() || person.name.length() > 64 || !validId(person.classId, 24) || (!person.cardId.isEmpty() && !validId(person.cardId, 16))) { error = "Datos de docente inválidos"; return false; }
   if (!findClass(person.classId)) { error = "La clase indicada no existe"; return false; }
   if (person.active && !cardAvailable(person.cardId, person.id, true)) { error = "La tarjeta ya está asignada a una persona activa"; return false; }
   for (size_t i = 0; i < teacherCount_; ++i) if (teachers_[i].id == person.id) { Person old = teachers_[i]; teachers_[i] = person; if (saveTeachers()) return true; teachers_[i] = old; error = "No se pudo guardar LittleFS"; return false; }
@@ -128,7 +183,7 @@ bool Storage::upsertTeacher(const Person& person, String& error) {
 }
 
 bool Storage::upsertClass(const ClassInfo& classInfo, String& error) {
-  if (!validId(classInfo.id, 24) || !validId(classInfo.name, 64)) { error = "Datos de clase inválidos"; return false; }
+  if (!validId(classInfo.id, 24) || classInfo.name.isEmpty() || classInfo.name.length() > 64) { error = "Datos de clase inválidos"; return false; }
   for (size_t i = 0; i < classCount_; ++i) if (classes_[i].id == classInfo.id) { ClassInfo old = classes_[i]; classes_[i] = classInfo; if (saveClasses()) return true; classes_[i] = old; error = "No se pudo guardar LittleFS"; return false; }
   if (classCount_ >= 20) { error = "Límite de clases alcanzado"; return false; }
   classes_[classCount_++] = classInfo; if (saveClasses()) return true; --classCount_; error = "No se pudo guardar LittleFS"; return false;

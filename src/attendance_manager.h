@@ -18,6 +18,8 @@ class AttendanceManager {
   bool active_ = false;
   String id_, date_, classId_, teacherId_, teacherName_, openedAt_;
   uint32_t openedMs_ = 0;
+  uint32_t lastCloseAttemptMs_ = 0;
+  bool closeFailed_ = false;
   Presence present_[MAX_PRESENT]; size_t presentCount_ = 0;
   String lastMessage_ = "CLASE CERRADA — Pase tarjeta de profesor";
   String lastClosedSummary_;
