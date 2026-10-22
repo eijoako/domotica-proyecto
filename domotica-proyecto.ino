@@ -23,6 +23,7 @@ void sendStatus() {
   attendance.writeStatus(doc);
   String body;
   serializeJson(doc, body);
+  server.sendHeader("Cache-Control", "no-store");
   server.send(200, "application/json", body);
 }
 
@@ -88,6 +89,7 @@ void sendAdminData() {
   doc["pendingCardId"] = pendingWriteCardId;
   doc["adminMessage"] = rfid.isConnected() ? adminMessage : "El RC522 no responde; revisar alimentación a 3.3 V y cables SPI";
   String body; serializeJson(doc, body);
+  server.sendHeader("Cache-Control", "no-store");
   server.send(200, "application/json", body);
 }
 
@@ -103,9 +105,13 @@ void setup() {
   WiFi.softAP(AP_SSID, AP_PASSWORD);
 
   server.on("/", HTTP_GET, [] {
+    server.sendHeader("Cache-Control", "no-store");
     server.send_P(200, "text/html; charset=utf-8", INDEX_HTML);
   });
-  server.on("/admin", HTTP_GET, [] { server.send_P(200, "text/html; charset=utf-8", ADMIN_HTML); });
+  server.on("/admin", HTTP_GET, [] {
+    server.sendHeader("Cache-Control", "no-store");
+    server.send_P(200, "text/html; charset=utf-8", ADMIN_HTML);
+  });
   server.on("/api/status", HTTP_GET, sendStatus);
   server.on("/api/time", HTTP_POST, setClock);
   server.on("/api/admin/data", HTTP_GET, sendAdminData);
