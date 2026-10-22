@@ -13,7 +13,7 @@ constexpr byte PIN_MISO = 19;
 constexpr byte PIN_MOSI = 23;
 constexpr byte DATA_BLOCK = 4;
 constexpr char WIFI_PASSWORD[] = "cambiar-esta-clave";
-constexpr char FIRMWARE_VERSION[] = "2.0.0";
+constexpr char FIRMWARE_VERSION[] = "2.0.1";
 constexpr uint32_t POLL_MS = 100;
 
 MFRC522 rfid(PIN_SS, PIN_RST);
@@ -97,6 +97,16 @@ void releaseCard() {
   rfid.PCD_StopCrypto1();
 }
 
+// A failed selection may leave the card in READY instead of IDLE/HALT.
+// Briefly removing the RF field lets it be selected again without a power cycle.
+void recoverCardSession() {
+  rfid.PCD_StopCrypto1();
+  rfid.PCD_AntennaOff();
+  delay(10);
+  rfid.PCD_AntennaOn();
+  delay(10);
+}
+
 bool checkReader(bool first) {
   if (!first && millis() - lastProbeMs < 2000) return readerConnected;
   lastProbeMs = millis();
@@ -130,7 +140,7 @@ Selection selectCard() {
              String(rfid.GetStatusCodeName(status)));
       lastDetectionErrorMs = millis();
     }
-    rfid.PCD_StopCrypto1();
+    recoverCardSession();
     return Selection::ERROR;
   }
   status = rfid.PICC_Select(&rfid.uid);
@@ -140,7 +150,7 @@ Selection selectCard() {
              String(rfid.GetStatusCodeName(status)));
       lastDetectionErrorMs = millis();
     }
-    rfid.PCD_StopCrypto1();
+    recoverCardSession();
     return Selection::ERROR;
   }
   return Selection::SELECTED;
@@ -174,8 +184,12 @@ bool readBlock(byte* data) {
   byte buffer[18];
   byte size = sizeof(buffer);
   const auto status = rfid.MIFARE_Read(DATA_BLOCK, buffer, &size);
-  if (status != MFRC522::STATUS_OK || size < 16) {
+  if (status != MFRC522::STATUS_OK) {
     report("ERROR_LECTURA", "Fallo al leer el bloque 4: " + String(rfid.GetStatusCodeName(status)));
+    return false;
+  }
+  if (size < 16) {
+    report("ERROR_LECTURA", "Lectura incompleta del bloque 4: " + String(size) + " bytes; se necesitan 16.");
     return false;
   }
   memcpy(data, buffer, 16);
@@ -321,10 +335,10 @@ void sendStatus() {
 
 void prepareWrite() {
   if (pending) { reply(409, "Hay una escritura pendiente; cancelarla o esperar su resultado"); return; }
-  if (!checkReader(true)) { reply(503, "El RC522 no responde; revisar 3.3 V y cables SPI"); return; }
   const String id = server.arg("cardId");
   if (!validCardId(id)) { reply(400, "Card ID invalido: usar entre 1 y 16 letras, numeros, guiones o guiones bajos"); return; }
   if (server.arg("confirm") != "yes") { reply(400, "Falta confirmar la sobrescritura"); return; }
+  if (!checkReader(true)) { reply(503, "El RC522 no responde; revisar 3.3 V y cables SPI"); return; }
   clearCard();
   trace = "";
   requestedId = id;

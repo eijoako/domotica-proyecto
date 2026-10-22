@@ -50,7 +50,7 @@ El RC522 debe alimentarse con **3,3 V, nunca con 5 V**.
 2. Elegir `Herramientas > Placa > ESP32 Arduino > ESP32 Dev Module`.
 3. Conectar la ESP32 y seleccionar el puerto USB correspondiente.
 4. Pulsar **Subir**. Si queda en `Connecting…`, mantener pulsado **BOOT** hasta que comience la carga y después soltarlo.
-5. Abrir el **Monitor serie a 115200 baudios** y pulsar **EN/RESET**. Debe aparecer `RFID-Lector | firmware 2.0.0`, el diagnóstico del RC522 y su dirección IP.
+5. Abrir el **Monitor serie a 115200 baudios** y pulsar **EN/RESET**. Debe aparecer `RFID-Lector | firmware 2.0.1`, el diagnóstico del RC522 y su dirección IP.
 6. Conectar el teléfono a **`RFID-Lector`**, con la contraseña **`cambiar-esta-clave`**. Si avisa que no hay Internet, debe mantenerse la conexión a esa red.
 7. Abrir **`http://192.168.4.1`**.
 8. Presentar una sola tarjeta sobre la antena del RC522. La web y el Monitor serie mostrarán UID técnico, tipo y contenido del bloque 4.
@@ -62,7 +62,7 @@ Una tarjeta apoyada no genera lecturas repetidas. Para releerla, debe retirarse 
 ## 4. Escritura de un ID
 
 1. Abrir **`escritor/escritor.ino`** y cargarlo en la misma ESP32.
-2. Comprobar en el Monitor serie que aparezca `RFID-Escritor | firmware 2.0.0`.
+2. Comprobar en el Monitor serie que aparezca `RFID-Escritor | firmware 2.0.1`.
 3. Conectar el teléfono a **`RFID-Escritor`**, con la misma contraseña, y abrir **`http://192.168.4.1`**.
 4. Ingresar un ID, por ejemplo **`PRUEBA_01`**. Se admiten entre 1 y 16 letras sin tildes, números, guiones y guiones bajos. Las mayúsculas y minúsculas se conservan.
 5. Marcar la confirmación de sobrescritura y pulsar **Preparar escritura**.
@@ -113,7 +113,7 @@ Siempre escribe los 16 bytes del bloque: el ID seguido de ceros. No se guardan n
 
 La contraseña está en `WIFI_PASSWORD`, al comienzo de cada sketch; debe tener entre 8 y 63 caracteres. Para mantener la misma en ambas redes, debe cambiarse en los dos programas.
 
-La web y el Monitor serie muestran **firmware 2.0.0** y el nombre del programa, para confirmar que se cargó el sketch correcto.
+La web y el Monitor serie muestran **firmware 2.0.1** y el nombre del programa, para confirmar que se cargó el sketch correcto.
 
 ## 8. Verificación del software
 
@@ -126,4 +126,6 @@ Esta versión se compiló con **Arduino CLI 1.5.1**, **ESP32 3.3.8**, placa **ES
 | Lector | Correcta | Pendiente en la placa del liceo |
 | Escritor | Correcta | Pendiente en la placa del liceo |
 
-También se comprobaron mediante simulación las validaciones, cancelación, vencimiento, sobrescritura con un ID más corto y los errores de lectura, autenticación, escritura y verificación. Las páginas pasaron comprobaciones de sintaxis y actualización de sus controles.
+La revisión 2.0.1 pasó **45 comprobaciones automatizadas**, incluidas pruebas del firmware con un modelo de estados de tarjeta y pruebas de las páginas en Chromium con pantalla de teléfono. Se verificaron validaciones, cancelación, vencimiento, sobrescritura con un ID más corto, reconexiones y errores de lectura, autenticación, escritura y verificación.
+
+Las pruebas y sus límites se documentan en [tests/README.md](tests/README.md). Son herramientas opcionales para desarrollo; no se necesitan para cargar los programas con Arduino IDE.
