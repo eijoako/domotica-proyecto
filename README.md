@@ -132,6 +132,7 @@ Por ejemplo, puede utilizarse `30UL * 1000UL` para treinta segundos. Deben resta
 - **No detecta tarjetas:** deben revisarse los cables y que el RC522 use 3.3 V.
 - **No abre la clase:** debe sincronizarse la hora y verificarse que sea una tarjeta de docente asignada.
 - **“Tarjeta no registrada”:** la tarjeta no tiene el `cardId` correcto en el bloque 4, o no está asignada como activa.
+- **`/admin` queda esperando la tarjeta:** consultar el mensaje que aparece en la página o el Monitor serie a 115200 baudios. Si indica que el RC522 no responde, revisar su alimentación a 3.3 V y las conexiones SPI. Si indica fallo de autenticación, la tarjeta puede no ser MIFARE Classic 1K con la clave predeterminada del sector 1; el programa no cambia las claves.
 - **No aparece la red Wi-Fi:** debe reiniciarse la ESP32 y revisarse el Monitor serie.
 
 ## Límites del prototipo

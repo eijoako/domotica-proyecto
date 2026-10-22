@@ -7,6 +7,11 @@
 namespace { MFRC522 reader(RFID_SS_PIN, RFID_RST_PIN); }
 void RfidReader::begin() { SPI.begin(RFID_SCK_PIN, RFID_MISO_PIN, RFID_MOSI_PIN, RFID_SS_PIN); reader.PCD_Init(); }
 
+bool RfidReader::isConnected() {
+  const byte version = reader.PCD_ReadRegister(MFRC522::VersionReg);
+  return version != 0x00 && version != 0xFF;
+}
+
 bool RfidReader::readCardId(String& cardId) {
   if (!reader.PICC_IsNewCardPresent() || !reader.PICC_ReadCardSerial()) return false;
   MFRC522::MIFARE_Key key; for (byte i = 0; i < 6; i++) key.keyByte[i] = 0xFF;
@@ -30,10 +35,24 @@ bool RfidReader::readCardId(String& cardId) {
 }
 
 bool RfidReader::writeCardId(const String& cardId, String& message) {
-  // WUPA also selects a card previously halted by readCardId(). This matters
-  // when /admin arms a write while that same card remains on the reader.
+  // REQA finds a new card; WUPA also finds one halted by an earlier read.
   byte answer[2]; byte answerSize = sizeof(answer);
-  if (reader.PICC_WakeupA(answer, &answerSize) != MFRC522::STATUS_OK || !reader.PICC_ReadCardSerial()) return false;
+  auto status = reader.PICC_RequestA(answer, &answerSize);
+  if (status != MFRC522::STATUS_OK) {
+    answerSize = sizeof(answer);
+    status = reader.PICC_WakeupA(answer, &answerSize);
+  }
+  if (status == MFRC522::STATUS_TIMEOUT) return false; // No card in the field.
+  if (status != MFRC522::STATUS_OK) {
+    message = String("Error de detección: ") + reader.GetStatusCodeName(status);
+    reader.PCD_StopCrypto1();
+    return true;
+  }
+  if (!reader.PICC_ReadCardSerial()) {
+    message = "Tarjeta detectada, pero no se pudo seleccionar; acerquela sola al lector";
+    reader.PCD_StopCrypto1();
+    return true;
+  }
   if (cardId.isEmpty() || cardId.length() > 16) { message = "Card ID inválido (máximo 16 caracteres)"; reader.PICC_HaltA(); reader.PCD_StopCrypto1(); return true; }
   if (reader.PICC_GetType(reader.uid.sak) != MFRC522::PICC_TYPE_MIFARE_1K) {
     message = "Se necesita una tarjeta MIFARE Classic 1K";
@@ -44,13 +63,23 @@ bool RfidReader::writeCardId(const String& cardId, String& message) {
   byte buffer[16] = {0};
   for (size_t i = 0; i < cardId.length(); ++i) buffer[i] = static_cast<byte>(cardId[i]);
   const auto auth = reader.PCD_Authenticate(MFRC522::PICC_CMD_MF_AUTH_KEY_A, block, &key, &(reader.uid));
-  const auto status = auth == MFRC522::STATUS_OK ? reader.MIFARE_Write(block, buffer, 16) : MFRC522::STATUS_ERROR;
+  if (auth != MFRC522::STATUS_OK) {
+    message = "No se pudo autenticar el bloque 4. La tarjeta puede usar otra clave: " + String(reader.GetStatusCodeName(auth));
+    reader.PICC_HaltA(); reader.PCD_StopCrypto1();
+    return true;
+  }
+  status = reader.MIFARE_Write(block, buffer, 16);
+  if (status != MFRC522::STATUS_OK) {
+    message = "No se pudo escribir el bloque 4: " + String(reader.GetStatusCodeName(status));
+    reader.PICC_HaltA(); reader.PCD_StopCrypto1();
+    return true;
+  }
   byte verify[18]; byte verifySize = sizeof(verify);
-  const bool verified = status == MFRC522::STATUS_OK &&
-      reader.MIFARE_Read(block, verify, &verifySize) == MFRC522::STATUS_OK &&
-      memcmp(buffer, verify, sizeof(buffer)) == 0;
+  const auto readStatus = reader.MIFARE_Read(block, verify, &verifySize);
+  const bool verified = readStatus == MFRC522::STATUS_OK && memcmp(buffer, verify, sizeof(buffer)) == 0;
   reader.PICC_HaltA(); reader.PCD_StopCrypto1();
-  message = verified ? "Tarjeta configurada y verificada" : "No se pudo escribir o verificar el bloque 4";
+  message = verified ? "Tarjeta configurada y verificada; retirala y acercala de nuevo para usarla" :
+      "Se escribio, pero no se pudo verificar el bloque 4; no usar la tarjeta hasta comprobarla";
   return true;
 }
 

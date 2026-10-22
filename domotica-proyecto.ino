@@ -75,6 +75,7 @@ void armCardWrite() {
   const String cardId = server.arg("cardId");
   if (cardId.isEmpty() || cardId.length() > 16) { sendJson(false, "Card ID inválido"); return; }
   if (!storage.findStudent(cardId) && !storage.findTeacher(cardId)) { sendJson(false, "Primero guarde una persona activa con este Card ID"); return; }
+  if (!rfid.isConnected()) { sendJson(false, "El RC522 no responde; revisar alimentación a 3.3 V y cables SPI"); return; }
   pendingWriteCardId = cardId;
   pendingWriteStartedMs = millis();
   adminMessage = "Acerque una tarjeta para escribir " + cardId;
@@ -85,7 +86,7 @@ void sendAdminData() {
   JsonDocument doc;
   storage.writeAdminData(doc);
   doc["pendingCardId"] = pendingWriteCardId;
-  doc["adminMessage"] = adminMessage;
+  doc["adminMessage"] = rfid.isConnected() ? adminMessage : "El RC522 no responde; revisar alimentación a 3.3 V y cables SPI";
   String body; serializeJson(doc, body);
   server.send(200, "application/json", body);
 }
@@ -129,7 +130,7 @@ void loop() {
   if (!pendingWriteCardId.isEmpty()) {
     if (millis() - pendingWriteStartedMs >= 60000) {
       pendingWriteCardId = "";
-      adminMessage = "Escritura cancelada: tiempo agotado";
+      adminMessage = "Escritura cancelada: el RC522 no detectó ninguna tarjeta en 60 segundos. Revisá el tipo de tarjeta, la posición y los cables";
       return;
     }
     String message;
@@ -137,6 +138,9 @@ void loop() {
       adminMessage = message;
       Serial.println(message);
       pendingWriteCardId = "";
+    } else if (millis() - pendingWriteStartedMs >= 5000 && adminMessage.startsWith("Acerque una tarjeta")) {
+      adminMessage = "El RC522 todavía no detecta la tarjeta. Apoyala sola sobre el lector; si persiste, revisá que sea de 13,56 MHz y los cables";
+      Serial.println(adminMessage);
     }
     return;
   }
