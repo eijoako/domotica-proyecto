@@ -36,6 +36,10 @@ class String {
   friend bool operator==(const String& a, const String& b) { return a.value == b.value; }
   friend bool operator!=(const String& a, const String& b) { return !(a == b); }
   void remove(size_t start, size_t count = std::string::npos) { value.erase(start, count); }
+  String substring(size_t start) const { return value.substr(start); }
+  bool endsWith(const String& suffix) const {
+    return value.size()>=suffix.value.size()&&value.compare(value.size()-suffix.value.size(),suffix.value.size(),suffix.value)==0;
+  }
   int indexOf(char c) const {
     const auto pos = value.find(c);
     return pos == value.npos ? -1 : static_cast<int>(pos);

@@ -1,6 +1,7 @@
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
+#include <LittleFS.h>
 #ifdef TEST_WRITER
 #include "../escritor/escritor.ino"
 #else
@@ -15,16 +16,23 @@ std::string unhex(const std::string& hex) {
   return result;
 }
 
-void resetProgram() {
+void resetProgram(bool erase=true) {
+  if(erase)FakeFS::reset();
   Fake::reset();
   stage = "INICIO"; message = ""; trace = ""; clearCard();
   readerConnected = false;
   readerVersion = 0;
   lastProbeMs = lastPollMs = lastDetectionErrorMs = 0;
+  lastCardUid="";lastCardSeenMs=0;
+  diagnosticPending=false;writing=false;attemptOpen=false;suppressAttendance=false;
+  attemptHead=attemptCount=activeSlot=0;attemptSerial=0;
+  for(auto& item:attempts)item=Attempt();
 #ifdef TEST_WRITER
   pending = false; waitingNotice = false; requestedId = ""; armedAtMs = 0;
 #else
-  lastCardUid = ""; lastCardSeenMs = 0;
+  currentRecord={};storageReady=sessionValid=sessionActive=closePending=false;
+  sessionPath="";attendanceMessage="[CERRADO] Pase tarjeta de docente.";
+  openedMs=lastCloseAttempt=clockAtMs=0;clockEpoch=0;
 #endif
   server.args.clear(); server.handlers.clear();
   setup();
@@ -43,6 +51,9 @@ void configure(const std::string& name, int value) {
   else if (name == "shortRead") Fake::shortRead = value;
   else if (name == "removeOnWrite") Fake::removeOnWrite = value;
   else if (name == "lostAck") Fake::lostAck = value;
+  else if (name == "fsWrite") FakeFS::failWrite=value;
+  else if (name == "fsRename") FakeFS::failRename=value;
+  else if (name == "fsMount") FakeFS::mounted=value;
   else throw std::runtime_error("Unknown fake setting: " + name);
 }
 
@@ -57,6 +68,10 @@ int main() {
     String responseBody;
     std::string cacheControl;
     if (op == "RESET") resetProgram();
+    else if(op=="REBOOT")resetProgram(false);
+    else if(op=="CORRUPT"){
+      for(auto& item:FakeFS::files)if(item.first.find(".bin")!=std::string::npos&&!item.second.empty()){item.second[0]^=1;break;}
+    }
     else if (op == "CARD") {
       int present;
       std::string bytes;
@@ -81,11 +96,14 @@ int main() {
     } else if (op == "LOG") {
       int count; line >> count;
       for (int i = 0; i < count; ++i) report("TEST", "bounded log: quotes \" and newline\n");
+    } else if(op=="ATTEMPTS"){
+      int count;line>>count;for(int i=0;i<count;++i){beginAttempt("TEST");report("TEST","historical error preserved");endAttempt();}
     } else if (op == "HTTP") {
       std::string method, path, id, confirmation;
       line >> method >> path >> id >> confirmation;
       server.args.clear();
-      if (!id.empty()) server.args["cardId"] = unhex(id).c_str();
+      const char* key=path=="/api/time"?"epoch":path=="/api/storage/init"?"confirmation":"personId";
+      if (!id.empty()) server.args[key] = unhex(id).c_str();
       if (!confirmation.empty()) server.args["confirm"] = unhex(confirmation).c_str();
       server.dispatch(method == "GET" ? HTTP_GET : HTTP_POST, path);
       responseCode = server.code;
@@ -104,6 +122,7 @@ int main() {
               << ",\"block\":" << jsonString(hexBytes(Fake::memory[4].data(), 16)).c_str()
               << ",\"writes\":" << Fake::writes << ",\"attempts\":" << Fake::attempts
               << ",\"reads\":" << Fake::reads
+              << ",\"formats\":" << FakeFS::formats
               << ",\"safe\":" << (protectedBlocksUntouched ? "true" : "false")
               << "}" << std::endl;
   }

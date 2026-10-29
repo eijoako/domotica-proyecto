@@ -1,21 +1,36 @@
-# Lector y escritor RFID — ESP32 + RC522
+# RFID escolar — asistencia y tarjetas
 
-> Proyecto escolar realizado completamente con **inteligencia artificial y prompt engineering**. El código y la documentación se desarrollaron a partir de requisitos para una demostración de aula.
+> Proyecto escolar realizado completamente con **inteligencia artificial y prompt engineering**. Su código y documentación se generaron a partir de requisitos para una demostración de aula.
 
-Este repositorio contiene **dos programas independientes para Arduino IDE**:
+La versión **3.0.0** mantiene dos programas independientes para **Arduino IDE**:
 
-- **`lector/lector.ino`** consulta la tarjeta y muestra su contenido; no escribe.
-- **`escritor/escritor.ino`** permite ingresar un ID desde una página web, escribirlo y verificarlo.
+- [lector/lector.ino](lector/lector.ino): asistencia para un grupo fijo y diagnóstico sin escritura.
+- [escritor/escritor.ino](escritor/escritor.ino): selección de una persona, escritura del bloque 4 y verificación.
 
-Ambos muestran el diagnóstico en la web y en el Monitor serie. Se carga **uno por vez** en la ESP32. Cargar un programa reemplaza al otro en la placa, pero no modifica por sí solo las tarjetas.
+Cada sketch se abre desde su propia carpeta y se carga por separado. La carga reemplaza al otro programa en la ESP32; no modifica por sí sola las tarjetas ni borra los registros de LittleFS. No se requiere PlatformIO, ArduinoJson ni Internet para las páginas.
 
-El firmware anterior de asistencia sigue recuperable en el historial de Git, hasta el commit `3a6b8dc`. Esta versión de diagnóstico no incluye clases, estudiantes, sesiones ni LittleFS.
+## 1. Grupo fijo
 
-## 1. Materiales y conexiones
+No existen altas, bajas ni edición desde la interfaz o la API. Son exactamente estas ocho personas y dos clases:
 
-Se necesitan una **ESP32 Dev Module**, un RC522, tarjetas **MIFARE Classic 1K de 13,56 MHz**, cables y un cable USB de datos. Las tarjetas de 125 kHz no funcionan con el RC522.
+| Persona | ID interno | Clase | Card ID en la tarjeta |
+|---|---|---|---|
+| Lucía Fernández | ALU_01 | Ingeniería | A7F3C901 |
+| Martina Silva | ALU_02 | Ingeniería | A7F3C902 |
+| Mateo Rodríguez | ALU_03 | Ingeniería | A7F3C903 |
+| Valentina Pereira | ALU_04 | Economía | A7F3C904 |
+| Santiago López | ALU_05 | Economía | A7F3C905 |
+| Nicolás González | ALU_06 | Economía | A7F3C906 |
+| Ana Martínez (docente) | PROF_01 | Ingeniería | B8D4E101 |
+| Martín Cabrera (docente) | PROF_02 | Economía | B8D4E102 |
 
-Las conexiones se realizan con la placa apagada:
+Los `cardId` son identificadores opacos y fijos. La tarjeta solo contiene ese valor, seguido de ceros hasta completar 16 bytes: **no contiene el nombre, la clase ni la cédula**. El UID se muestra como dato técnico, pero no se utiliza para identificar a una persona.
+
+## 2. Materiales y conexiones
+
+Se necesitan una ESP32 Dev Module, un RC522, tarjetas **MIFARE Classic 1K de 13,56 MHz**, cables Dupont y un cable USB de datos. Las tarjetas de 125 kHz no son compatibles.
+
+Con la placa apagada, el cableado es:
 
 | RC522 | ESP32 |
 |---|---|
@@ -27,105 +42,98 @@ Las conexiones se realizan con la placa apagada:
 | GND | GND |
 | 3.3V | 3.3V |
 
-El RC522 debe alimentarse con **3,3 V, nunca con 5 V**.
+El RC522 utiliza **3,3 V, nunca 5 V**.
 
-## 2. Preparación de Arduino IDE
+## 3. Preparación y carga con Arduino IDE
 
-1. Instalar o abrir **Arduino IDE 2.x**.
+1. Instalar o abrir Arduino IDE 2.x.
 2. En `Archivo > Preferencias > URLs adicionales de gestores de tarjetas`, agregar:
 
    ```text
    https://espressif.github.io/arduino-esp32/package_esp32_index.json
    ```
 
-3. En el Gestor de placas, instalar **esp32 by Espressif Systems**.
-4. En el Administrador de bibliotecas, instalar **MFRC522**, de Miguel Balboa, versión **1.4.12**.
-5. Descargar el repositorio con `Code > Download ZIP` en GitHub y descomprimirlo antes de abrir el sketch.
+3. Instalar **esp32 by Espressif Systems** desde el Gestor de placas.
+4. Instalar **MFRC522 de Miguel Balboa, versión 1.4.12**, desde el Administrador de bibliotecas. WiFi, WebServer, SPI y LittleFS vienen con el núcleo ESP32.
+5. Descargar el ZIP de GitHub y descomprimirlo.
+6. Abrir el archivo `.ino` deseado desde su carpeta. No deben reunirse ambos sketches en una misma carpeta.
+7. Seleccionar **ESP32 Dev Module**, elegir el puerto USB y pulsar **Subir**.
+8. Si queda en `Connecting…`, mantener pulsado **BOOT** hasta comenzar la carga y después soltarlo.
+9. Abrir el Monitor serie a **115200 baudios** y pulsar **EN/RESET**. Deben aparecer el nombre del programa y `firmware 3.0.0`.
 
-`WiFi`, `WebServer` y `SPI` vienen con el soporte de ESP32. **No se necesitan PlatformIO, ArduinoJson ni complementos para subir archivos.**
+Si el chip deja de responder durante la carga, se recomienda cerrar el Monitor serie, comprobar el cable de datos, reducir `Upload Speed` a 115200 y probar la carga con el RC522 desconectado. El lector se vuelve a conectar con la placa apagada.
 
-## 3. Primera comprobación con el lector
+## 4. Acceso a las páginas
 
-1. Abrir **`lector/lector.ino`**. Debe permanecer en la carpeta `lector`; no deben juntarse los dos sketches en una misma carpeta.
-2. Elegir `Herramientas > Placa > ESP32 Arduino > ESP32 Dev Module`.
-3. Conectar la ESP32 y seleccionar el puerto USB correspondiente.
-4. Pulsar **Subir**. Si queda en `Connecting…`, mantener pulsado **BOOT** hasta que comience la carga y después soltarlo.
-5. Abrir el **Monitor serie a 115200 baudios** y pulsar **EN/RESET**. Debe aparecer `RFID-Lector | firmware 2.0.1`, el diagnóstico del RC522 y su dirección IP.
-6. Conectar el teléfono a **`RFID-Lector`**, con la contraseña **`cambiar-esta-clave`**. Si avisa que no hay Internet, debe mantenerse la conexión a esa red.
-7. Abrir **`http://192.168.4.1`**.
-8. Presentar una sola tarjeta sobre la antena del RC522. La web y el Monitor serie mostrarán UID técnico, tipo y contenido del bloque 4.
-
-Si no hay un ID válido, igualmente se muestra el bloque en hexadecimal. El UID es solo información técnica: **no se utiliza como identificador interno**.
-
-Una tarjeta apoyada no genera lecturas repetidas. Para releerla, debe retirarse durante al menos medio segundo y acercarse nuevamente.
-
-## 4. Escritura de un ID
-
-1. Abrir **`escritor/escritor.ino`** y cargarlo en la misma ESP32.
-2. Comprobar en el Monitor serie que aparezca `RFID-Escritor | firmware 2.0.1`.
-3. Conectar el teléfono a **`RFID-Escritor`**, con la misma contraseña, y abrir **`http://192.168.4.1`**.
-4. Ingresar un ID, por ejemplo **`PRUEBA_01`**. Se admiten entre 1 y 16 letras sin tildes, números, guiones y guiones bajos. Las mayúsculas y minúsculas se conservan.
-5. Marcar la confirmación de sobrescritura y pulsar **Preparar escritura**.
-6. Presentar una sola tarjeta y mantenerla quieta.
-7. Consultar el diagnóstico: detección → selección → autenticación → lectura previa → escritura → verificación.
-8. Considerar confirmada la operación solo cuando aparezca **`ESCRITURA_OK`**.
-9. Retirar la tarjeta. Para volver a escribir debe prepararse una nueva operación.
-
-El botón **Cancelar** abandona una operación que todavía espera tarjeta. A los 60 segundos la espera se cancela automáticamente. No se escribe al arrancar ni fuera de una operación preparada.
-
-No hace falta crear estudiantes, clases o personas.
-
-## 5. Verificación independiente y sobrescritura
-
-La comprobación completa requiere estos pasos:
-
-1. Con el escritor, guardar `PRUEBA_01` y obtener `ESCRITURA_OK`.
-2. Cargar el lector y comprobar que la misma tarjeta devuelva exactamente `PRUEBA_01`.
-3. Cargar el escritor y sobrescribirla con `OTRO_02`.
-4. Cargar el lector y comprobar `OTRO_02`. En hexadecimal, los bytes posteriores al ID deben ser `00`, sin restos del ID anterior.
-5. Reiniciar la ESP32 y repetir la lectura. El ID permanece en la tarjeta.
-
-Este procedimiento verifica el contenido con un programa distinto del escritor. **La validación del hardware requiere completarlo con una ESP32, un RC522 y tarjetas reales.**
-
-## 6. Interpretación de errores
-
-| Mensaje | Significado y comprobación |
+| Programa cargado | Red Wi-Fi |
 |---|---|
-| `ERROR_LECTOR` / registro `00` o `FF` | No hay comunicación con el RC522. Deben revisarse alimentación y conexiones SPI y reiniciarse la placa. |
-| `ESPERANDO_TARJETA` | El RC522 responde, pero todavía no detecta tarjeta. Debe probarse una sola tarjeta de 13,56 MHz sobre la antena. |
-| `ERROR_DETECCION` / `ERROR_SELECCION` | Hubo respuesta, pero no se completó la selección. Debe mantenerse una sola tarjeta quieta y volver a preparar la operación. |
-| `TIPO_NO_COMPATIBLE` | Se detectó una tarjeta distinta de MIFARE Classic 1K. No se escribe. |
-| `ERROR_AUTENTICACION` | Falló el acceso con Key A predeterminada. Puede haber otra clave o problemas de comunicación. |
-| `ERROR_LECTURA` | No pudo leerse el bloque 4. Si era la lectura previa, se abandona la escritura. |
-| `ERROR_ESCRITURA` | El lector no confirmó la escritura. Debe comprobarse el contenido con el programa lector. |
-| `ERROR_VERIFICACION` | La escritura fue enviada, pero su lectura posterior falló o no coincidió. No se informa éxito. |
-| `TIEMPO_AGOTADO` / `CANCELADO` | La espera terminó sin ejecutar una escritura. |
+| Lector | RFID-Lector |
+| Escritor | RFID-Escritor |
 
-Si persiste un problema, debe compartirse el **diagnóstico completo** de la web o del Monitor serie, desde la versión del programa hasta el último error. La página está en `/`; ya no se usa `/admin`.
+La contraseña inicial es **`cambiar-esta-clave`**. Se configura en `WIFI_PASSWORD` dentro de cada sketch y debe tener entre 8 y 63 caracteres.
 
-Si falla la carga por USB, se recomienda cerrar el Monitor serie, reducir `Upload Speed` a **115200** y comprobar el cable y el puerto.
+Después de conectar el teléfono a la red correspondiente, se abre **http://192.168.4.1**. El teléfono debe permanecer en esa red aunque avise que no tiene Internet. Ya no se utiliza `/admin`.
 
-## 7. Contenido modificado y configuración
+Las páginas usan únicamente negro y blanco, tipografía monoespaciada y resultados textuales: `[OK]`, `[ERROR]`, `[ESPERANDO]` y `[CERRADO]`. La versión y el nombre del programa permiten comprobar qué firmware está cargado.
 
-El escritor usa exclusivamente el **bloque de datos 4 del sector 1**, autenticado con **Key A `FF FF FF FF FF FF`**. No prueba otras claves, no modifica permisos y no escribe el bloque 0 ni tráileres de sector.
+## 5. Preparación de las ocho tarjetas
 
-Siempre escribe los 16 bytes del bloque: el ID seguido de ceros. No se guardan nombres ni cédulas. El diagnóstico y la última lectura viven en RAM y se pierden al reiniciar la placa.
+1. Cargar el escritor y abrir su página.
+2. Elegir una persona en **Persona**. La pantalla mostrará el Card ID fijo correspondiente; no existe un campo libre para inventar otros IDs.
+3. Marcar la confirmación de sobrescritura y pulsar **Preparar escritura**.
+4. Presentar una sola tarjeta y mantenerla quieta.
+5. Revisar el diagnóstico: detección, selección, autenticación, lectura previa, escritura y verificación.
+6. Aceptar la operación únicamente si aparece **ESCRITURA_OK** y el ID leído coincide con el solicitado.
+7. Retirar la tarjeta y repetir el procedimiento con las demás personas. Cada operación requiere confirmación.
 
-La contraseña está en `WIFI_PASSWORD`, al comienzo de cada sketch; debe tener entre 8 y 63 caracteres. Para mantener la misma en ambas redes, debe cambiarse en los dos programas.
+La escritura modifica exclusivamente el **bloque de datos 4 del sector 1**, con Key A predeterminada `FF FF FF FF FF FF`. Nunca modifica el bloque 0, los tráileres, las claves ni los permisos.
 
-La web y el Monitor serie muestran **firmware 2.0.1** y el nombre del programa, para confirmar que se cargó el sketch correcto.
+Siempre se comparan los 16 bytes después de escribir. Si la confirmación o la lectura fallan, no se anuncia éxito; debe comprobarse la tarjeta mediante el lector.
 
-## 8. Verificación del software
+## 6. Almacenamiento y asistencia
 
-Cada sketch debe compilarse por separado para ESP32 Dev Module. Las pruebas de lógica permiten comprobar validaciones, cancelación y errores, pero no demuestran por sí solas la escritura física de una tarjeta.
+1. Cargar el lector y abrir su página.
+2. Revisar el estado de LittleFS. Si una placa nueva no tiene el sistema de archivos preparado, aparecerá **Inicializar almacenamiento**.
+3. La inicialización es explícita: se debe escribir `INICIALIZAR` y pulsar el botón. **Puede borrar datos previos y no debe utilizarse para intentar recuperar registros dañados.** No se ejecuta automáticamente. Si el almacenamiento está montado correctamente, el servidor rechaza el formateo.
+4. Pulsar **Sincronizar hora del teléfono** antes de abrir una clase. Los registros utilizan la hora de Uruguay, UTC−3. No se permite cambiar la hora durante una sesión.
+5. Pasar la tarjeta de Ana Martínez para abrir Ingeniería, o la de Martín Cabrera para abrir Economía.
+6. Pasar las tarjetas de los tres estudiantes de esa clase. La lista muestra los presentes y sus fechas y horas.
+7. Una tarjeta desconocida, un estudiante de otra clase o un segundo docente no reemplazan ni alteran la sesión. Un estudiante repetido no genera otro registro.
+8. A los diez minutos, la ventana se cierra automáticamente y se conservan los presentes. Si falla el guardado del cierre, se impiden nuevas asistencias y se reintenta cada cinco segundos.
+9. El enlace **Descargar registros** exporta todas las sesiones como `asistencias.ndjson`: un objeto JSON por línea.
 
-Esta versión se compiló con **Arduino CLI 1.5.1**, **ESP32 3.3.8**, placa **ESP32 Dev Module** (`esp32:esp32:esp32`) y **MFRC522 1.4.12**:
+Cada registro aceptado se guarda antes de confirmarlo en pantalla. Los archivos internos están en `/sessions/`, usan un formato binario versionado con comprobación de integridad y se reemplazan mediante un archivo temporal y renombrado de LittleFS. No se borra el archivo anterior antes de renombrar.
 
-| Programa | Compilación | Comprobación física |
-|---|---|---|
-| Lector | Correcta | Pendiente en la placa del liceo |
-| Escritor | Correcta | Pendiente en la placa del liceo |
+Si se reinicia la ESP32 durante una clase, los registros aceptados se conservan, la sesión queda cerrada como `DEVICE_RESTART` y se vuelve a pedir sincronización de hora. El cierre por reinicio no inventa una hora: `closedAt` queda vacío. Si un archivo está dañado, el sistema informa el error y no lo borra ni formatea la memoria.
 
-La revisión 2.0.1 pasó **45 comprobaciones automatizadas**, incluidas pruebas del firmware con un modelo de estados de tarjeta y pruebas de las páginas en Chromium con pantalla de teléfono. Se verificaron validaciones, cancelación, vencimiento, sobrescritura con un ID más corto, reconexiones y errores de lectura, autenticación, escritura y verificación.
+## 7. Diagnóstico desde la web
 
-Las pruebas y sus límites se documentan en [tests/README.md](tests/README.md). Son herramientas opcionales para desarrollo; no se necesitan para cargar los programas con Arduino IDE.
+Ambos programas muestran por separado la respuesta de la ESP32, el estado del RC522 y la última tarjeta identificada.
+
+- **Probar tarjeta sin escribir:** espera una tarjeta durante 30 segundos, muestra tipo, UID técnico, autenticación y contenido del bloque 4. No escribe ni registra asistencia. La tarjeta debe retirarse antes de volver a utilizarla en la asistencia, incluso si se cancela la prueba.
+- **Reiniciar RC522:** recupera el lector sin reiniciar la ESP32, borrar los intentos o cerrar la clase. Se rechaza mientras haya una operación pendiente.
+- **Cancelar espera:** abandona una escritura o un diagnóstico todavía pendientes. No cambia una operación que ya terminó.
+- **Copiar diagnóstico:** obtiene un informe con versión, programa, estado del RC522 y últimos intentos. Si el navegador bloquea el portapapeles por HTTP, muestra un cuadro seleccionable para copiar manualmente.
+- **Últimos 20 intentos:** conserva resultados y errores durante el encendido. Cada intento se puede desplegar. Al reiniciar la ESP32 se pierde este historial de diagnóstico en RAM, pero no las asistencias guardadas.
+
+La espera de escritura es de 60 segundos. El diagnóstico del Monitor serie contiene los mismos pasos que la web.
+
+| Resultado | Comprobación |
+|---|---|
+| ERROR_LECTOR / registro 00 o FF | Alimentación a 3,3 V y conexiones SPI. |
+| ESPERANDO_TARJETA | Una tarjeta compatible sobre la antena, sin otras tarjetas cerca. |
+| ERROR_DETECCION / ERROR_SELECCION | Mantener una sola tarjeta quieta y reintentar. El lector recupera la sesión de radio tras el fallo. |
+| TIPO_NO_COMPATIBLE | Utilizar MIFARE Classic 1K. |
+| ERROR_AUTENTICACION | Puede haber otra clave o un problema de radio. No se intentan cambiar las claves. |
+| ERROR_LECTURA | Revisar el error exacto; una lectura incompleta se rechaza. |
+| ERROR_ESCRITURA / ERROR_VERIFICACION | Comprobar el contenido antes de usar la tarjeta; no se considera éxito. |
+
+## 8. Comprobación de la demostración
+
+La prueba física debe incluir: configurar las ocho tarjetas, abrir ambas clases, registrar a sus tres estudiantes, rechazar una tarjeta de otra clase, repetir un estudiante, esperar el cierre y reiniciar para comprobar la conservación de datos.
+
+Antes de utilizar una tarjeta escrita, puede cargarse el lector y usarse **Probar tarjeta sin escribir** para verificar su ID de forma independiente.
+
+Las pruebas automatizadas están en [tests/README.md](tests/README.md). Incluyen simulaciones del firmware, fallos de persistencia y pruebas de la página real en Chromium. **No equivalen a comprobar la radio ni la escritura con una ESP32 y un RC522 físicos.** El uso normal solo requiere Arduino IDE; las herramientas de pruebas son opcionales para desarrollo.
+
+La revisión 3.0.0 pasó **71 comprobaciones automatizadas**. Ambos programas se verificaron por separado para ESP32 Dev Module con núcleo ESP32 3.3.8, MFRC522 1.4.12 y Arduino CLI 1.5.1. La comprobación física de las ocho tarjetas sigue pendiente en el liceo.
