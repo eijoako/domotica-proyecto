@@ -14,6 +14,10 @@ inline bool corrupt = false, selectFail = false, detectFail = false;
 inline bool shortRead = false, removeOnWrite = false, lostAck = false;
 inline bool crypto = false, safe = true;
 inline byte version = 0x92;
+inline byte uidSize = 4;
+inline bool oversizedRead = false;
+inline uint32_t initializedAt = 0;
+inline unsigned earlyProbes = 0;
 inline byte uid[4] = {1, 2, 3, 4};
 inline int writes = 0, attempts = 0, reads = 0, initializations = 0;
 inline std::array<std::array<byte, 16>, 64> memory;
@@ -22,6 +26,7 @@ inline void reset() {
   unsupported = authFail = readFail = writeFail = verifyFail = false;
   corrupt = selectFail = detectFail = shortRead = removeOnWrite = lostAck = false;
   crypto = false; safe = true; version = 0x92;
+  uidSize=4;oversizedRead=false;initializedAt=0;earlyProbes=0;
   writes = attempts = reads = initializations = 0;
   for (auto& block : memory) block.fill(0xA5);
   memory[4].fill(0);
@@ -42,12 +47,16 @@ class MFRC522 {
   MFRC522(int, int) {}
   void PCD_Init() {
     ++Fake::initializations;
+    Fake::initializedAt=millis();
     Fake::crypto = false;
     Fake::tag = Fake::Tag::IDLE;
   }
   void PCD_AntennaOff() { Fake::crypto = false; Fake::tag = Fake::Tag::IDLE; }
   void PCD_AntennaOn() {}
-  byte PCD_ReadRegister(PCD_Register) { return Fake::version; }
+  byte PCD_ReadRegister(PCD_Register) {
+    if(millis()-Fake::initializedAt<50)++Fake::earlyProbes;
+    return Fake::version;
+  }
   StatusCode PICC_RequestA(byte*, byte*) {
     if (Fake::detectFail) return STATUS_ERROR;
     if (!Fake::present || Fake::tag != Fake::Tag::IDLE) return STATUS_TIMEOUT;
@@ -63,6 +72,7 @@ class MFRC522 {
   StatusCode PICC_Select(Uid* target) {
     if (Fake::selectFail || Fake::tag != Fake::Tag::READY) return STATUS_ERROR;
     Fake::tag = Fake::Tag::ACTIVE;
+    target->size=Fake::uidSize;
     memcpy(target->uidByte, Fake::uid, 4);
     return STATUS_OK;
   }
@@ -86,7 +96,7 @@ class MFRC522 {
         !Fake::crypto || *size < 18 || Fake::readFail ||
         (Fake::verifyFail && Fake::writes > 0)) return STATUS_ERROR;
     memcpy(data, Fake::memory[4].data(), 16);
-    *size = Fake::shortRead ? 15 : 18;
+    *size = Fake::oversizedRead ? 255 : Fake::shortRead ? 15 : 18;
     ++Fake::reads;
     return STATUS_OK;
   }

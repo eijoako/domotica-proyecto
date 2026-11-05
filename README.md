@@ -2,12 +2,11 @@
 
 > Proyecto escolar realizado completamente con **inteligencia artificial y prompt engineering**. Su código y documentación se generaron a partir de requisitos para una demostración de aula.
 
-La versión **3.0.0** mantiene dos programas independientes para **Arduino IDE**:
+La versión **3.2.0** reúne asistencia, escritura y diagnóstico en un único programa para **Arduino IDE**: [lector/lector.ino](lector/lector.ino).
 
-- [lector/lector.ino](lector/lector.ino): asistencia para un grupo fijo y diagnóstico sin escritura.
-- [escritor/escritor.ino](escritor/escritor.ino): selección de una persona, escritura del bloque 4 y verificación.
+La asistencia está en **http://192.168.4.1/** y la configuración de tarjetas en **http://192.168.4.1/admin**. No es necesario cambiar de firmware para pasar de una función a otra. El antiguo sketch `escritor/escritor.ino` se retiró para mantener una sola implementación.
 
-Cada sketch se abre desde su propia carpeta y se carga por separado. La carga reemplaza al otro programa en la ESP32; no modifica por sí sola las tarjetas ni borra los registros de LittleFS. No se requiere PlatformIO, ArduinoJson ni Internet para las páginas.
+Los registros siguen guardándose en LittleFS con el mismo formato. **Todavía no se incorpora una base de datos**. No se requiere PlatformIO, ArduinoJson ni Internet para las páginas.
 
 ## 1. Grupo fijo
 
@@ -56,29 +55,26 @@ El RC522 utiliza **3,3 V, nunca 5 V**.
 3. Instalar **esp32 by Espressif Systems** desde el Gestor de placas.
 4. Instalar **MFRC522 de Miguel Balboa, versión 1.4.12**, desde el Administrador de bibliotecas. WiFi, WebServer, SPI y LittleFS vienen con el núcleo ESP32.
 5. Descargar el ZIP de GitHub y descomprimirlo.
-6. Abrir el archivo `.ino` deseado desde su carpeta. No deben reunirse ambos sketches en una misma carpeta.
+6. Abrir `lector/lector.ino` y conservar `CooperativeServer.h` junto al `.ino`; no requiere instalación ni generación previa. Solo se carga este programa.
 7. Seleccionar **ESP32 Dev Module**, elegir el puerto USB y pulsar **Subir**.
 8. Si queda en `Connecting…`, mantener pulsado **BOOT** hasta comenzar la carga y después soltarlo.
-9. Abrir el Monitor serie a **115200 baudios** y pulsar **EN/RESET**. Deben aparecer el nombre del programa y `firmware 3.0.0`.
+9. Abrir el Monitor serie a **115200 baudios** y pulsar **EN/RESET**. Deben aparecer `RFID-ESP32` y `firmware 3.2.0`. Tras actualizar el firmware, debe recargarse también la página del teléfono.
 
 Si el chip deja de responder durante la carga, se recomienda cerrar el Monitor serie, comprobar el cable de datos, reducir `Upload Speed` a 115200 y probar la carga con el RC522 desconectado. El lector se vuelve a conectar con la placa apagada.
 
 ## 4. Acceso a las páginas
 
-| Programa cargado | Red Wi-Fi |
-|---|---|
-| Lector | RFID-Lector |
-| Escritor | RFID-Escritor |
+La red Wi-Fi es **`RFID-ESP32`** y la contraseña inicial es **`cambiar-esta-clave`**. Se configura en `WIFI_PASSWORD` dentro del sketch y debe tener entre 8 y 63 caracteres.
 
-La contraseña inicial es **`cambiar-esta-clave`**. Se configura en `WIFI_PASSWORD` dentro de cada sketch y debe tener entre 8 y 63 caracteres.
+Después de conectar el teléfono, se abre **http://192.168.4.1** para asistencia, o **http://192.168.4.1/admin** para configurar tarjetas. Ambas páginas tienen enlaces de navegación. El teléfono debe permanecer en esa red aunque avise que no tiene Internet.
 
-Después de conectar el teléfono a la red correspondiente, se abre **http://192.168.4.1**. El teléfono debe permanecer en esa red aunque avise que no tiene Internet. Ya no se utiliza `/admin`.
+`/admin` separa las pantallas; no añade un inicio de sesión ni permisos por usuario. Los equipos conectados a la red pueden acceder a la escritura, que sigue exigiendo confirmación explícita.
 
 Las páginas usan únicamente negro y blanco, tipografía monoespaciada y resultados textuales: `[OK]`, `[ERROR]`, `[ESPERANDO]` y `[CERRADO]`. La versión y el nombre del programa permiten comprobar qué firmware está cargado.
 
 ## 5. Preparación de las ocho tarjetas
 
-1. Cargar el escritor y abrir su página.
+1. Cargar el programa único y abrir **http://192.168.4.1/admin**.
 2. Elegir una persona en **Persona**. La pantalla mostrará el Card ID fijo correspondiente; no existe un campo libre para inventar otros IDs.
 3. Marcar la confirmación de sobrescritura y pulsar **Preparar escritura**.
 4. Presentar una sola tarjeta y mantenerla quieta.
@@ -90,9 +86,11 @@ La escritura modifica exclusivamente el **bloque de datos 4 del sector 1**, con 
 
 Siempre se comparan los 16 bytes después de escribir. Si la confirmación o la lectura fallan, no se anuncia éxito; debe comprobarse la tarjeta mediante el lector.
 
+Durante una escritura o diagnóstico se pausa el registro automático de tarjetas, pero el tiempo de la clase sigue corriendo y su cierre se guarda al vencer. La tarjeta utilizada en administración debe retirarse durante al menos 400 ms antes de volver a presentarla para asistencia. Esto también se aplica después de cancelar o fallar una escritura. Dos clientes no pueden reemplazar una operación pendiente.
+
 ## 6. Almacenamiento y asistencia
 
-1. Cargar el lector y abrir su página.
+1. Abrir **http://192.168.4.1/** con el mismo programa cargado.
 2. Revisar el estado de LittleFS. Si una placa nueva no tiene el sistema de archivos preparado, aparecerá **Inicializar almacenamiento**.
 3. La inicialización es explícita: se debe escribir `INICIALIZAR` y pulsar el botón. **Puede borrar datos previos y no debe utilizarse para intentar recuperar registros dañados.** No se ejecuta automáticamente. Si el almacenamiento está montado correctamente, el servidor rechaza el formateo.
 4. Pulsar **Sincronizar hora del teléfono** antes de abrir una clase. Los registros utilizan la hora de Uruguay, UTC−3. No se permite cambiar la hora durante una sesión.
@@ -108,7 +106,7 @@ Si se reinicia la ESP32 durante una clase, los registros aceptados se conservan,
 
 ## 7. Diagnóstico desde la web
 
-Ambos programas muestran por separado la respuesta de la ESP32, el estado del RC522 y la última tarjeta identificada.
+Ambas páginas muestran por separado la respuesta de la ESP32, el estado del RC522 y la última tarjeta identificada. Comparten el estado y el historial de un único RC522.
 
 - **Probar tarjeta sin escribir:** espera una tarjeta durante 30 segundos, muestra tipo, UID técnico, autenticación y contenido del bloque 4. No escribe ni registra asistencia. La tarjeta debe retirarse antes de volver a utilizarla en la asistencia, incluso si se cancela la prueba.
 - **Reiniciar RC522:** recupera el lector sin reiniciar la ESP32, borrar los intentos o cerrar la clase. Se rechaza mientras haya una operación pendiente.
@@ -132,8 +130,34 @@ La espera de escritura es de 60 segundos. El diagnóstico del Monitor serie cont
 
 La prueba física debe incluir: configurar las ocho tarjetas, abrir ambas clases, registrar a sus tres estudiantes, rechazar una tarjeta de otra clase, repetir un estudiante, esperar el cierre y reiniciar para comprobar la conservación de datos.
 
-Antes de utilizar una tarjeta escrita, puede cargarse el lector y usarse **Probar tarjeta sin escribir** para verificar su ID de forma independiente.
+Antes de utilizar una tarjeta escrita, se puede retirar y volver a presentar mediante **Probar tarjeta sin escribir**, sin cambiar de firmware.
 
 Las pruebas automatizadas están en [tests/README.md](tests/README.md). Incluyen simulaciones del firmware, fallos de persistencia y pruebas de la página real en Chromium. **No equivalen a comprobar la radio ni la escritura con una ESP32 y un RC522 físicos.** El uso normal solo requiere Arduino IDE; las herramientas de pruebas son opcionales para desarrollo.
 
-La revisión 3.0.0 pasó **71 comprobaciones automatizadas**. Ambos programas se verificaron por separado para ESP32 Dev Module con núcleo ESP32 3.3.8, MFRC522 1.4.12 y Arduino CLI 1.5.1. La comprobación física de las ocho tarjetas sigue pendiente en el liceo.
+La revisión 3.2.0 pasó **108 comprobaciones automatizadas**, incluidas ambas páginas en Chromium. Las pruebas simulan errores de radio, UID de longitud inválida y lecturas de bloque incompletas o de longitud excesiva, bajo sanitizadores de memoria. La comprobación física de esta versión sigue pendiente en el liceo.
+
+El sketch unificado compiló para `esp32:esp32:esp32` con Arduino CLI 1.5.1, núcleo ESP32 3.3.8 y MFRC522 1.4.12: **1062049 bytes de programa** y **51932 bytes de variables globales**. Estas cifras no miden el heap durante el uso ni su fragmentación.
+
+El buffer de lectura mantiene 18 bytes para datos y CRC, antes de copiar los 16 bytes de datos. Se rechazan UID que no tengan 4, 7 o 10 bytes y longitudes de respuesta fuera del buffer. La escritura valida el límite de 16 bytes del ID antes de copiarlo. También se corrigió la inicialización duplicada del RC522 y se conserva una pausa de 50 ms después de cada inicialización real. Estos controles no identifican por sí solos el fallo anterior descrito como un error de buffer: sin su mensaje exacto no se afirma haber reproducido su causa.
+
+## 9. Optimización conservada desde la versión 3.1.0
+
+El panel consulta el estado cada 500 ms cuando hay una operación o sesión activa, y cada dos segundos en reposo. Al ocultar la pestaña se pausa la consulta; al volver o recuperar conexión se sincroniza de inmediato. El funcionamiento del lector y el guardado de asistencia no dependen de que la pestaña esté visible.
+
+Las APIs se separan para evitar transferir información que no cambió:
+
+| Ruta GET | Contenido |
+|---|---|
+| `/api/status` | Estado actual, cuenta regresiva, `bootId`, `stateRevision` y `historyRevision`. No incluye personas ni el historial completo. |
+| `/api/people` | Las ocho personas fijas; se consulta una vez al cargar la página. |
+| `/api/attempts` | Snapshot completo de hasta veinte intentos, con `bootId`, revisión y secuencias más antigua y reciente. Se consulta solo al cambiar la revisión o el arranque. |
+
+Cada cliente sustituye su copia del historial por el snapshot recibido. Esto evita duplicados y recupera los intentos disponibles después de perder conexión, aunque hayan ocurrido más de veinte. Un arranque distinto invalida la copia anterior. Las consultas no cambian los intentos almacenados.
+
+El firmware utiliza estados explícitos para las operaciones y para la asistencia. Se mantienen los límites anteriores de texto: log actual de hasta 3500 bytes UTF-8, recortado a una línea completa después de 3000 cuando supera el límite, y hasta 1600 bytes por intento finalizado. Un intento en curso se consulta en el estado actual; su snapshot final se guarda al terminar, sin copiarlo en cada GET.
+
+El historial y el informe se serializan por entrada, en lugar de construir una cadena con las veinte entradas. El lector usa escrituras TCP no bloqueantes para comprobar el vencimiento durante la transmisión. Cierra una conexión sin progreso durante 250 ms o que exceda dos segundos en una escritura. Una descarga interrumpida puede reintentarse y no borra registros.
+
+El servidor sigue siendo síncrono: no procesa otras solicitudes HTTP ni nuevas lecturas RFID dentro de una descarga. El servicio cooperativo mantiene la evaluación del cierre; no puede interrumpir una operación de LittleFS que esté en curso. No realiza llamadas recursivas al manejador HTTP.
+
+El formato binario de 84 bytes y el guardado inmediato de asistencias se conservan. La metodología, los resultados históricos de la versión 3.1.0 y sus límites se documentan en [tests/OPTIMIZATION.md](tests/OPTIMIZATION.md). Sus mediciones no se presentan como nuevas mediciones de la versión unificada.

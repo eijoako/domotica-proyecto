@@ -8,11 +8,13 @@
 #include <string>
 #include <type_traits>
 using byte = uint8_t;
+using PGM_P = const char*;
 #define HEX 16
 #define PROGMEM
 namespace Fake { inline uint32_t now = 10000; }
 inline uint32_t millis() { return Fake::now; }
 inline void delay(unsigned long n) { Fake::now += n; }
+inline void yield() {}
 class String {
   std::string value;
  public:
@@ -28,6 +30,7 @@ class String {
   }
   bool isEmpty() const { return value.empty(); }
   size_t length() const { return value.length(); }
+  bool reserve(size_t count) { value.reserve(count); return true; }
   const char* c_str() const { return value.c_str(); }
   char operator[](size_t i) const { return value.at(i); }
   String& operator+=(const String& other) { value += other.value; return *this; }

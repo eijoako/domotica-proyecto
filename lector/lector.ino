@@ -1,8 +1,10 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WebServer.h>
+#include "CooperativeServer.h"
 #include <SPI.h>
 #include <MFRC522.h>
+#include <esp_system.h>
 #include <string.h>
 
 // ESP32 Dev Module + RC522, powered at 3.3 V.
@@ -13,11 +15,12 @@ constexpr byte PIN_MISO = 19;
 constexpr byte PIN_MOSI = 23;
 constexpr byte DATA_BLOCK = 4;
 constexpr char WIFI_PASSWORD[] = "cambiar-esta-clave";
-constexpr char FIRMWARE_VERSION[] = "3.0.0";
+constexpr char FIRMWARE_VERSION[] = "3.2.0";
 constexpr uint32_t POLL_MS = 100;
 
 MFRC522 rfid(PIN_SS, PIN_RST);
-WebServer server(80);
+void tickAttendance();
+CooperativeServer server(80,tickAttendance);
 String stage = "INICIO";
 String message = "Iniciando RC522";
 String trace;
@@ -51,20 +54,41 @@ struct Attempt {
 Attempt attempts[20];
 byte attemptHead=0, attemptCount=0, activeSlot=0;
 uint32_t attemptSerial=0;
-bool attemptOpen=false, pending=false, diagnosticPending=false, writing=false, suppressAttendance=false;
+bool attemptOpen=false, suppressAttendance=false;
+
+enum class OperationState { IDLE, WAIT_DIAGNOSTIC, WAIT_WRITE, WRITING };
+OperationState operationState=OperationState::IDLE;
+String bootId;
+uint32_t stateRevision=0, historyRevision=0;
+bool isWritePending(){return operationState==OperationState::WAIT_WRITE;}
+bool isDiagnosticPending(){return operationState==OperationState::WAIT_DIAGNOSTIC;}
+bool isWriting(){return operationState==OperationState::WRITING;}
+bool operationBusy(){return operationState!=OperationState::IDLE;}
+void setOperation(OperationState state){
+ if(operationState!=state){operationState=state;++stateRevision;}
+}
+const char* operationName(){
+ switch(operationState){
+  case OperationState::WAIT_DIAGNOSTIC:return "WAIT_DIAGNOSTIC";
+  case OperationState::WAIT_WRITE:return "WAIT_WRITE";
+  case OperationState::WRITING:return "WRITING";
+  default:return "IDLE";
+ }
+}
+
 bool waitingNotice=false;
 String requestedId;
 uint32_t armedAtMs=0;
 constexpr uint32_t WRITE_TIMEOUT_MS=60000, DIAGNOSTIC_TIMEOUT_MS=30000;
 String lastCardUid;
 uint32_t lastCardSeenMs=0;
-#ifdef WRITER_FIRMWARE
 void writeSelectedCard();
-#endif
 
 // JSON strings are escaped without requiring an extra JSON library.
 String jsonString(const String& value) {
-  String out = "\"";
+  String out;
+  out.reserve(value.length()+16);
+  out = "\"";
   for (size_t i = 0; i < value.length(); ++i) {
     const uint8_t c = static_cast<uint8_t>(value[i]);
     if (c == '"' || c == '\\') { out += '\\'; out += static_cast<char>(c); }
@@ -78,6 +102,7 @@ String jsonString(const String& value) {
 }
 
 void report(const char* nextStage, const String& text) {
+  ++stateRevision;
   stage = nextStage;
   message = text;
   const String line = String(millis()) + " ms [" + stage + "] " + text + "\n";
@@ -93,6 +118,7 @@ void report(const char* nextStage, const String& text) {
 
 String hexBytes(const byte* bytes, byte count) {
   String out;
+  out.reserve(count*3);
   for (byte i = 0; i < count; ++i) {
     if (i) out += ' ';
     if (bytes[i] < 16) out += '0';
@@ -120,6 +146,7 @@ String decodeCardId(const byte* data) {
 }
 
 void clearCard() {
+  ++stateRevision;
   cardUid = ""; cardType = ""; cardId = ""; blockHex = ""; expectedHex = "";
 }
 
@@ -141,7 +168,7 @@ void recoverCardSession() {
 bool checkReader(bool first) {
   if (!first && millis() - lastProbeMs < 2000) return readerConnected;
   lastProbeMs = millis();
-  if (!readerConnected) rfid.PCD_Init();
+  if (!readerConnected) { rfid.PCD_Init(); delay(50); }
   const byte version = rfid.PCD_ReadRegister(MFRC522::VersionReg);
   const bool connected = version != 0x00 && version != 0xFF;
   if (first || connected != readerConnected) {
@@ -151,6 +178,7 @@ bool checkReader(bool first) {
     else
       report("ERROR_LECTOR", "El RC522 no responde (registro 00/FF). Revisar 3.3 V y cables SPI.");
   }
+  if(readerVersion!=version)++stateRevision;
   readerVersion = version;
   readerConnected = connected;
   return connected;
@@ -184,6 +212,10 @@ Selection selectCard() {
     recoverCardSession();
     return Selection::ERROR;
   }
+  if(rfid.uid.size!=4&&rfid.uid.size!=7&&rfid.uid.size!=10){
+    report("ERROR_SELECCION","Longitud de UID inválida; se descartó la respuesta.");
+    recoverCardSession();return Selection::ERROR;
+  }
   return Selection::SELECTED;
 }
 
@@ -212,12 +244,15 @@ bool authenticate() {
 }
 
 bool readBlock(byte* data) {
-  byte buffer[18];
+  byte buffer[18] = {};
   byte size = sizeof(buffer);
   const auto status = rfid.MIFARE_Read(DATA_BLOCK, buffer, &size);
   if (status != MFRC522::STATUS_OK) {
     report("ERROR_LECTURA", "Fallo al leer el bloque 4: " + String(rfid.GetStatusCodeName(status)));
     return false;
+  }
+  if(size>sizeof(buffer)){
+    report("ERROR_LECTURA","Longitud de respuesta inválida; se descartó el bloque.");return false;
   }
   if (size < 16) {
     report("ERROR_LECTURA", "Lectura incompleta del bloque 4: " + String(size) + " bytes; se necesitan 16.");
@@ -235,12 +270,11 @@ void reply(int code, const String& text) {
 }
 
 void beginHardware(const char* ssid) {
+  bootId=String(esp_random(),HEX)+"-"+String(esp_random(),HEX);
   Serial.begin(115200);
   Serial.println();
   Serial.printf("%s | firmware %s\n", ssid, FIRMWARE_VERSION);
   SPI.begin(PIN_SCK, PIN_MISO, PIN_MOSI, PIN_SS);
-  rfid.PCD_Init();
-  delay(50);
   checkReader(true);
   WiFi.mode(WIFI_AP);
   if (!WiFi.softAP(ssid, WIFI_PASSWORD)) Serial.println("ERROR: no se pudo crear la red Wi-Fi.");
@@ -271,12 +305,18 @@ void beginAttempt(const String& kind) {
  attempts[activeSlot].number=++attemptSerial;
  attempts[activeSlot].at=millis();
  attempts[activeSlot].kind=kind;
+ attempts[activeSlot].stage="EN_CURSO";
+ attempts[activeSlot].message="Consultar el estado actual.";
+ ++historyRevision;++stateRevision;
  attemptOpen=true;
  lastDetectionErrorMs=0;
 }
-void endAttempt() { snapshotAttempt(); attemptOpen=false; }
+void endAttempt() {
+ if(!attemptOpen)return;
+ snapshotAttempt();attemptOpen=false;++historyRevision;++stateRevision;
+}
 String peopleJson() {
- String s="[";
+ String s;s.reserve(1400);s="[";
  for(byte i=0;i<8;++i){
   if(i)s+=",";
   s+="{\"id\":"+jsonString(PEOPLE[i].id)+",\"name\":"+jsonString(PEOPLE[i].name);
@@ -285,33 +325,55 @@ String peopleJson() {
  }
  return s+"]";
 }
-String attemptsJson() {
- snapshotAttempt();
- String s="[";
+
+String attemptJson(const Attempt& a){
+ String s;
+ s.reserve(768+a.trace.length()*2);
+ s="{\"number\":";s+=String(a.number);s+=",\"atMs\":"+String(a.at)+",\"kind\":"+jsonString(a.kind);
+ s+=",\"stage\":"+jsonString(a.stage)+",\"message\":"+jsonString(a.message);
+ s+=",\"trace\":"+jsonString(a.trace)+",\"uid\":"+jsonString(a.uid);
+ s+=",\"type\":"+jsonString(a.type)+",\"cardId\":"+jsonString(a.card);
+ s+=",\"blockHex\":"+jsonString(a.block)+",\"expectedHex\":"+jsonString(a.expected)+"}";
+ return s;
+}
+void sendPeople(){
+ server.sendHeader("Cache-Control","no-store");
+ server.send(200,"application/json; charset=utf-8","{\"people\":"+peopleJson()+"}");
+}
+void sendAttempts(){
+ // Full bounded snapshot; each client replaces its copy, even after missed events.
+ // Serialize one attempt per chunk, never an entire history-sized temporary.
+ server.sendHeader("Cache-Control","no-store");
+ server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+ server.send(200,"application/json; charset=utf-8","");
+ const uint32_t newest=attemptCount?attempts[(attemptHead+19)%20].number:0;
+ const uint32_t oldest=attemptCount?attempts[(attemptHead+20-attemptCount)%20].number:0;
+ server.sendContent("{\"bootId\":"+jsonString(bootId)+",\"historyRevision\":"+String(historyRevision)+
+                    ",\"oldestSequence\":"+String(oldest)+",\"newestSequence\":"+String(newest)+",\"attempts\":[");
  for(byte n=0;n<attemptCount;++n){
-  if(n)s+=",";
-  const Attempt& a=attempts[(attemptHead+19-n)%20];
-  s+="{\"number\":"+String(a.number)+",\"atMs\":"+String(a.at)+",\"kind\":"+jsonString(a.kind);
-  s+=",\"stage\":"+jsonString(a.stage)+",\"message\":"+jsonString(a.message);
-  s+=",\"trace\":"+jsonString(a.trace)+",\"uid\":"+jsonString(a.uid);
-  s+=",\"type\":"+jsonString(a.type)+",\"cardId\":"+jsonString(a.card);
-  s+=",\"blockHex\":"+jsonString(a.block)+",\"expectedHex\":"+jsonString(a.expected)+"}";
+  if(n)server.sendContent(",");
+  server.sendContent(attemptJson(attempts[(attemptHead+19-n)%20]));
+  yield();
  }
- return s+"]";
+ server.sendContent("]}");
+ server.sendContent("");
 }
 String commonStatus(const char* mode) {
- const uint32_t duration=pending?WRITE_TIMEOUT_MS:DIAGNOSTIC_TIMEOUT_MS;
+ const uint32_t duration=isWritePending()?WRITE_TIMEOUT_MS:DIAGNOSTIC_TIMEOUT_MS;
  const uint32_t elapsed=millis()-armedAtMs;
- String s="{\"mode\":"+jsonString(mode)+",\"version\":"+jsonString(FIRMWARE_VERSION);
+ String s;s.reserve(1024+trace.length()*2);
+ s="{\"mode\":";s+=jsonString(mode);s+=",\"version\":"+jsonString(FIRMWARE_VERSION);
+ s+=",\"bootId\":"+jsonString(bootId)+",\"stateRevision\":"+String(stateRevision);
+ s+=",\"historyRevision\":"+String(historyRevision)+",\"operation\":"+jsonString(operationName());
  s+=",\"connected\":"+String(readerConnected?"true":"false");
  s+=",\"readerVersion\":"+jsonString(hexBytes(&readerVersion,1));
  s+=",\"stage\":"+jsonString(stage)+",\"message\":"+jsonString(message)+",\"trace\":"+jsonString(trace);
  s+=",\"uid\":"+jsonString(cardUid)+",\"type\":"+jsonString(cardType);
  s+=",\"cardId\":"+jsonString(cardId)+",\"blockHex\":"+jsonString(blockHex)+",\"expectedHex\":"+jsonString(expectedHex);
- s+=",\"pending\":"+String(pending?"true":"false")+",\"diagnosticPending\":"+String(diagnosticPending?"true":"false");
+ s+=",\"pending\":"+String(isWritePending()?"true":"false")+",\"diagnosticPending\":"+String(isDiagnosticPending()?"true":"false");
  s+=",\"requestedId\":"+jsonString(requestedId);
- s+=",\"remainingSeconds\":"+String((pending||diagnosticPending)&&elapsed<duration?(duration-elapsed+999)/1000:0);
- s+=",\"people\":"+peopleJson()+",\"attempts\":"+attemptsJson();
+ s+=",\"remainingSeconds\":"+String((isWritePending()||isDiagnosticPending())&&elapsed<duration?(duration-elapsed+999)/1000:0);
+
  return s;
 }
 bool readSelectedCard() {
@@ -324,52 +386,55 @@ bool readSelectedCard() {
  return true;
 }
 void diagnoseCard() {
- if(pending||diagnosticPending||writing){reply(409,"Hay una operación pendiente.");return;}
+ if(operationBusy()){reply(409,"Hay una operación pendiente.");return;}
  if(!checkReader(true)){reply(503,"El RC522 no responde.");return;}
  beginAttempt("DIAGNOSTICO");
  suppressAttendance=true;
- diagnosticPending=true; waitingNotice=false; armedAtMs=millis();
+ setOperation(OperationState::WAIT_DIAGNOSTIC); waitingNotice=false; armedAtMs=millis();
  report("ESPERANDO_TARJETA","Prueba sin escritura ni registro de asistencia. Acercar una tarjeta.");
  reply(202,"Diagnóstico preparado.");
 }
 void cancelOperation() {
- if(!pending&&!diagnosticPending){reply(409,"No hay una operación esperando tarjeta; revisar el resultado.");return;}
- pending=false; diagnosticPending=false;
+ if(!isWritePending()&&!isDiagnosticPending()){reply(409,"No hay una operación esperando tarjeta; revisar el resultado.");return;}
+ setOperation(OperationState::IDLE);
  report("CANCELADO","Operación cancelada."); endAttempt(); reply(200,"Cancelado.");
 }
 void resetReader() {
- if(pending||diagnosticPending||writing){reply(409,"Cancelar o terminar la operación antes de reiniciar el RC522.");return;}
+ if(operationBusy()){reply(409,"Cancelar o terminar la operación antes de reiniciar el RC522.");return;}
  beginAttempt("REINICIO_LECTOR");
  readerConnected=false; lastCardUid="";
  checkReader(true);
  endAttempt();reply(readerConnected?200:503,readerConnected?"RC522 reiniciado. La asistencia no fue modificada.":"El RC522 no responde.");
 }
 void diagnosticReport() {
- snapshotAttempt();
- String s="RFID "+String(FIRMWARE_VERSION)+"\nESP32: responde\nRC522: "+String(readerConnected?"conectado":"sin respuesta");
-#ifdef WRITER_FIRMWARE
- s+="\nPrograma: escritor";
-#else
- s+="\nPrograma: lector";
-#endif
- s+="\nRegistro de versión: "+hexBytes(&readerVersion,1)+"\n";
- for(byte n=0;n<attemptCount;++n){
-  const Attempt& a=attempts[(attemptHead+19-n)%20];
-  s+="\n--- Intento "+String(a.number)+" / "+a.kind+" / "+String(a.at)+" ms ---\n";
-  s+=a.trace+"\nResultado: "+a.stage+" / "+a.message+"\n";
- }
  server.sendHeader("Cache-Control","no-store");
- server.send(200,"text/plain; charset=utf-8",s);
+ server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+ server.send(200,"text/plain; charset=utf-8","");
+ String header="RFID "+String(FIRMWARE_VERSION)+"\nESP32: responde\nRC522: "+String(readerConnected?"conectado":"sin respuesta");
+ header+="\nPrograma: asistencia y administración";
+ header+="\nRegistro de versión: "+hexBytes(&readerVersion,1)+"\n";
+ server.sendContent(header);
+ for(byte n=0;n<attemptCount;++n){
+  const byte slot=(attemptHead+19-n)%20;
+  const Attempt& a=attempts[slot];
+  server.sendContent("\n--- Intento "+String(a.number)+" / "+a.kind+" / "+String(a.at)+" ms ---\n");
+  if(attemptOpen&&slot==activeSlot)
+   server.sendContent(trace+"\nResultado actual: "+stage+" / "+message+"\n");
+  else
+   server.sendContent(a.trace+"\nResultado: "+a.stage+" / "+a.message+"\n");
+  yield();
+ }
+ server.sendContent("");
 }
 bool pollManual(bool connected) {
- if(!pending&&!diagnosticPending)return false;
- const uint32_t duration=pending?WRITE_TIMEOUT_MS:DIAGNOSTIC_TIMEOUT_MS;
+ if(!isWritePending()&&!isDiagnosticPending())return false;
+ const uint32_t duration=isWritePending()?WRITE_TIMEOUT_MS:DIAGNOSTIC_TIMEOUT_MS;
  if(!connected){
-  pending=false;diagnosticPending=false;
+  setOperation(OperationState::IDLE);
   report("ERROR_LECTOR","Operación interrumpida: el RC522 no responde.");endAttempt();return true;
  }
  if(millis()-armedAtMs>=duration){
-  pending=false;diagnosticPending=false;
+  setOperation(OperationState::IDLE);
   report("TIEMPO_AGOTADO","Terminó la espera sin completar una operación.");endAttempt();return true;
  }
  if(millis()-lastPollMs<POLL_MS)return true;
@@ -383,16 +448,16 @@ bool pollManual(bool connected) {
  }
  if(selection==Selection::SELECTED){
   lastCardUid=hexBytes(rfid.uid.uidByte,rfid.uid.size);lastCardSeenMs=millis();
-#ifdef WRITER_FIRMWARE
-  if(pending){pending=false;writing=true;writeSelectedCard();writing=false;}
+  if(isWritePending()){setOperation(OperationState::WRITING);writeSelectedCard();setOperation(OperationState::IDLE);}
   else
-#endif
-  {diagnosticPending=false;readSelectedCard();releaseCard();}
+  {setOperation(OperationState::IDLE);readSelectedCard();releaseCard();}
  }
- pending=false;diagnosticPending=false;endAttempt();
+ setOperation(OperationState::IDLE);endAttempt();
  return true;
 }
 void registerCommonRoutes() {
+ server.on("/api/people",HTTP_GET,sendPeople);
+ server.on("/api/attempts",HTTP_GET,sendAttempts);
  server.on("/api/diagnose",HTTP_POST,diagnoseCard);
  server.on("/api/cancel",HTTP_POST,cancelOperation);
  server.on("/api/reader/reset",HTTP_POST,resetReader);
@@ -419,11 +484,22 @@ bool saveRecord(const String& path,AttendanceRecord r);
 bool readRecord(File& f,AttendanceRecord& r);
 String recordJson(const AttendanceRecord& r);
 AttendanceRecord currentRecord={};
-bool storageReady=false, sessionValid=false, sessionActive=false, closePending=false;
+enum class AttendanceState { CLOSED, OPEN, CLOSE_PENDING };
+AttendanceState attendanceState=AttendanceState::CLOSED;
+void setAttendanceState(AttendanceState state);
+bool isSessionActive(){return attendanceState!=AttendanceState::CLOSED;}
+bool isClosePending(){return attendanceState==AttendanceState::CLOSE_PENDING;}
+void setAttendanceState(AttendanceState state){
+ if(attendanceState!=state){attendanceState=state;++stateRevision;}
+}
+bool storageReady=false, sessionValid=false;
 String sessionPath, attendanceMessage="[CERRADO] Pase tarjeta de docente.";
 uint32_t openedMs=0, lastCloseAttempt=0, clockAtMs=0;
 int64_t clockEpoch=0;
 
+void setAttendanceMessage(const String& text){
+ attendanceMessage=text;++stateRevision;
+}
 uint32_t recordChecksum(const AttendanceRecord& r) {
  const byte* data=reinterpret_cast<const byte*>(&r);
  uint32_t hash=2166136261U;
@@ -451,8 +527,8 @@ bool readRecord(File& f,AttendanceRecord& r) {
  return f&&f.size()==RECORD_SIZE&&f.read(reinterpret_cast<byte*>(&r),RECORD_SIZE)==RECORD_SIZE&&validRecord(r);
 }
 bool beginAttendanceStorage() {
- storageReady=false;sessionValid=false;sessionActive=false;closePending=false;
- if(!LittleFS.begin(false)) {attendanceMessage="[ERROR] No se pudo montar LittleFS. No se formateó.";return false;}
+ storageReady=false;sessionValid=false;setAttendanceState(AttendanceState::CLOSED);++stateRevision;
+ if(!LittleFS.begin(false)) {setAttendanceMessage("[ERROR] No se pudo montar LittleFS. No se formateó.");return false;}
  if(!LittleFS.exists("/sessions")&&!LittleFS.mkdir("/sessions"))return false;
  File dir=LittleFS.open("/sessions");if(!dir||!dir.isDirectory())return false;
  File f=dir.openNextFile();
@@ -460,8 +536,8 @@ bool beginAttendanceStorage() {
   if(!f.isDirectory()&&String(f.name()).endsWith(".bin")){
    const String path=f.path();AttendanceRecord r;
    const bool ok=readRecord(f,r);f.close();
-   if(!ok){attendanceMessage="[ERROR] Registro dañado; no se borró: "+path;return false;}
-   if(r.reason==0){r.reason=2;r.closed=0;if(!saveRecord(path,r)){attendanceMessage="[ERROR] No se pudo conservar el cierre por reinicio.";return false;}}
+   if(!ok){setAttendanceMessage("[ERROR] Registro dañado; no se borró: "+path);return false;}
+   if(r.reason==0){r.reason=2;r.closed=0;if(!saveRecord(path,r)){setAttendanceMessage("[ERROR] No se pudo conservar el cierre por reinicio.");return false;}}
    if(!sessionValid||r.opened>currentRecord.opened||(r.opened==currentRecord.opened&&r.nonce>currentRecord.nonce)){
     currentRecord=r;sessionPath=path;sessionValid=true;
    }
@@ -469,7 +545,7 @@ bool beginAttendanceStorage() {
   f=dir.openNextFile();
  }
  storageReady=true;
- if(sessionValid)attendanceMessage=currentRecord.reason==2?"[CERRADO] Sesión interrumpida por reinicio; presentes conservados.":"[CERRADO] Última sesión conservada.";
+ if(sessionValid)setAttendanceMessage(currentRecord.reason==2?"[CERRADO] Sesión interrumpida por reinicio; presentes conservados.":"[CERRADO] Última sesión conservada.");
  return true;
 }
 int64_t epochNow() {return clockEpoch?clockEpoch+(millis()-clockAtMs)/1000:0;}
@@ -480,7 +556,7 @@ String timestamp(int64_t epoch) {
  return String(out);
 }
 String recordJson(const AttendanceRecord& r) {
- String s="{\"teacherId\":"+jsonString(PEOPLE[r.teacher].id)+",\"teacher\":"+jsonString(PEOPLE[r.teacher].name);
+ String s; s.reserve(1024);s="{\"teacherId\":";s+=jsonString(PEOPLE[r.teacher].id);s+=",\"teacher\":"+jsonString(PEOPLE[r.teacher].name);
  s+=",\"class\":"+jsonString(CLASSES[PEOPLE[r.teacher].group]);
  s+=",\"openedAt\":"+jsonString(timestamp(r.opened))+",\"closedAt\":"+jsonString(timestamp(r.closed));
  s+=",\"closeReason\":"+jsonString(r.reason==0?"OPEN":r.reason==1?"TIMEOUT":"DEVICE_RESTART");
@@ -494,58 +570,58 @@ String recordJson(const AttendanceRecord& r) {
  return s+"]}";
 }
 void tickAttendance() {
- if(!sessionActive||millis()-openedMs<SESSION_MS)return;
- if(closePending&&millis()-lastCloseAttempt<5000)return;
+ if(!isSessionActive()||millis()-openedMs<SESSION_MS)return;
+ if(isClosePending()&&millis()-lastCloseAttempt<5000)return;
  lastCloseAttempt=millis();
  AttendanceRecord finished=currentRecord;finished.reason=1;finished.closed=finished.opened+600;
  if(!saveRecord(sessionPath,finished)){
-  closePending=true;attendanceMessage="[ERROR] Ventana cerrada; se reintentará guardar el cierre.";return;
+  setAttendanceState(AttendanceState::CLOSE_PENDING);setAttendanceMessage("[ERROR] Ventana cerrada; se reintentará guardar el cierre.");return;
  }
- currentRecord=finished;sessionActive=false;closePending=false;
- attendanceMessage="[CERRADO] Asistencia cerrada automáticamente; registros conservados.";
+ currentRecord=finished;setAttendanceState(AttendanceState::CLOSED);
+ setAttendanceMessage("[CERRADO] Asistencia cerrada automáticamente; registros conservados.");
 }
 void attendanceScan(const String& card) {
  tickAttendance();
  const int person=personByCard(card);
- if(!storageReady){attendanceMessage="[ERROR] Almacenamiento no disponible.";return;}
- if(closePending){attendanceMessage="[ERROR] Cierre pendiente de guardar; no se admiten registros.";return;}
- if(person<0){attendanceMessage="[ERROR] Tarjeta no registrada.";return;}
- if(!sessionActive){
-  if(!PEOPLE[person].teacher){attendanceMessage="[CERRADO] Solo un docente puede abrir la clase.";return;}
-  if(!clockEpoch){attendanceMessage="[ERROR] Sincronizar la hora antes de abrir asistencia.";return;}
+ if(!storageReady){setAttendanceMessage("[ERROR] Almacenamiento no disponible.");return;}
+ if(isClosePending()){setAttendanceMessage("[ERROR] Cierre pendiente de guardar; no se admiten registros.");return;}
+ if(person<0){setAttendanceMessage("[ERROR] Tarjeta no registrada.");return;}
+ if(!isSessionActive()){
+  if(!PEOPLE[person].teacher){setAttendanceMessage("[CERRADO] Solo un docente puede abrir la clase.");return;}
+  if(!clockEpoch){setAttendanceMessage("[ERROR] Sincronizar la hora antes de abrir asistencia.");return;}
   AttendanceRecord created;memset(&created,0,sizeof(created));
   created.magic=0x52464944;created.version=1;created.teacher=person;created.opened=epochNow();
   String path;
   do {created.nonce=esp_random();path="/sessions/"+String(static_cast<unsigned long>(created.opened))+"-"+String(created.nonce,HEX)+".bin";}while(LittleFS.exists(path));
-  if(!saveRecord(path,created)){attendanceMessage="[ERROR] No se pudo crear la sesión.";return;}
-  currentRecord=created;sessionPath=path;sessionValid=true;sessionActive=true;openedMs=millis();
-  attendanceMessage="[OK] Clase abierta: "+String(CLASSES[PEOPLE[person].group]);return;
+  if(!saveRecord(path,created)){setAttendanceMessage("[ERROR] No se pudo crear la sesión.");return;}
+  currentRecord=created;sessionPath=path;sessionValid=true;setAttendanceState(AttendanceState::OPEN);openedMs=millis();
+  setAttendanceMessage("[OK] Clase abierta: "+String(CLASSES[PEOPLE[person].group]));return;
  }
- if(PEOPLE[person].teacher){attendanceMessage="[ERROR] Ya hay una sesión abierta; no se reemplazó.";return;}
- if(PEOPLE[person].group!=PEOPLE[currentRecord.teacher].group){attendanceMessage="[ERROR] Estudiante de otra clase.";return;}
- if(currentRecord.present&(1<<person)){attendanceMessage="[OK] Ya estaba registrado; no se duplicó.";return;}
+ if(PEOPLE[person].teacher){setAttendanceMessage("[ERROR] Ya hay una sesión abierta; no se reemplazó.");return;}
+ if(PEOPLE[person].group!=PEOPLE[currentRecord.teacher].group){setAttendanceMessage("[ERROR] Estudiante de otra clase.");return;}
+ if(currentRecord.present&(1<<person)){setAttendanceMessage("[OK] Ya estaba registrado; no se duplicó.");return;}
  AttendanceRecord updated=currentRecord;updated.present|=1<<person;updated.scanned[person]=epochNow();
- if(!saveRecord(sessionPath,updated)){attendanceMessage="[ERROR] No se pudo guardar; volver a pasar la tarjeta.";return;}
- currentRecord=updated;attendanceMessage="[OK] Alumno registrado: "+String(PEOPLE[person].name);
+ if(!saveRecord(sessionPath,updated)){setAttendanceMessage("[ERROR] No se pudo guardar; volver a pasar la tarjeta.");return;}
+ currentRecord=updated;setAttendanceMessage("[OK] Alumno registrado: "+String(PEOPLE[person].name));
 }
 String attendanceJson() {
- const bool open=sessionActive&&millis()-openedMs<SESSION_MS;
- String s="{\"storageReady\":"+String(storageReady?"true":"false")+",\"clockReady\":"+String(clockEpoch?"true":"false");
- s+=",\"active\":"+String(open?"true":"false")+",\"closePending\":"+String(closePending?"true":"false");
+ const bool open=isSessionActive()&&millis()-openedMs<SESSION_MS;
+ String s; s.reserve(1400);s="{\"storageReady\":";s+=String(storageReady?"true":"false");s+=",\"clockReady\":"+String(clockEpoch?"true":"false");
+ s+=",\"active\":"+String(open?"true":"false")+",\"closePending\":"+String(isClosePending()?"true":"false");
  s+=",\"message\":"+jsonString(attendanceMessage);
  s+=",\"remainingSeconds\":"+String(open?(SESSION_MS-(millis()-openedMs)+999)/1000:0);
  s+=",\"session\":"+String(sessionValid?recordJson(currentRecord):"null");
  return s+"}";
 }
 void synchronizeClock() {
- if(sessionActive){reply(409,"No se cambia la hora durante una sesión.");return;}
+ if(isSessionActive()){reply(409,"No se cambia la hora durante una sesión.");return;}
  const String text=server.arg("epoch");char* end;
  const long long epoch=strtoll(text.c_str(),&end,10);
  if(end==text.c_str()||*end||epoch<1704067200LL||epoch>4102444800LL){reply(400,"Fecha inválida.");return;}
- clockEpoch=epoch;clockAtMs=millis();reply(200,"Hora sincronizada (Uruguay, UTC-3).");
+ clockEpoch=epoch;clockAtMs=millis();++stateRevision;reply(200,"Hora sincronizada (Uruguay, UTC-3).");
 }
 void initializeStorage() {
- if(storageReady||sessionActive){reply(409,"No se permite formatear un almacenamiento montado o una sesión abierta.");return;}
+ if(storageReady||isSessionActive()){reply(409,"No se permite formatear un almacenamiento montado o una sesión abierta.");return;}
  if(server.arg("confirmation")!="INICIALIZAR"){reply(400,"Se requiere confirmación explícita: INICIALIZAR. Puede borrar datos previos.");return;}
  if(!LittleFS.format()||!beginAttendanceStorage()){reply(500,"No se pudo inicializar LittleFS.");return;}
  reply(200,"Almacenamiento preparado.");
@@ -556,16 +632,24 @@ void exportAttendance() {
  server.sendHeader("Content-Disposition","attachment; filename=asistencias.ndjson");
  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
  server.send(200,"application/x-ndjson; charset=utf-8","");
+ tickAttendance();
  File dir=LittleFS.open("/sessions");File f=dir.openNextFile();
  while(f){
+  tickAttendance();
+  if(!server.client().connected()){f.close();break;}
   if(!f.isDirectory()&&String(f.name()).endsWith(".bin")){
    AttendanceRecord r;
-   if(readRecord(f,r))server.sendContent(recordJson(r)+"\n");
-   else server.sendContent("{\"error\":\"Registro dañado\"}\n");
+   if(readRecord(f,r)){
+    // A deadline may atomically replace this file while its old handle is open.
+    if(sessionValid&&sessionPath==String(f.path()))r=currentRecord;
+    server.sendContent(recordJson(r)+"\n");
+   }else server.sendContent("{\"error\":\"Registro dañado\"}\n");
   }
-  f.close();f=dir.openNextFile();
+  f.close();tickAttendance();yield();f=dir.openNextFile();
  }
+ tickAttendance();
  server.sendContent("");
+ tickAttendance();
 }
 const char PAGE[] PROGMEM=R"HTML(
 <!doctype html><html lang="es"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -588,6 +672,7 @@ label{display:block;margin:12px 0}pre,dd,output{white-space:pre-wrap;overflow-wr
 [hidden]{display:none!important}summary{cursor:pointer;min-height:44px}textarea{min-height:160px}
 </style><main>
 <h1 id="title">RFID // TERMINAL</h1><p id="version"></p>
+<nav aria-label="Navegación"><a href="/">Asistencia</a><a href="/admin">Administrar tarjetas</a></nav>
 <section aria-label="Estado"><p id="esp">[ESPERANDO] ESP32</p><p id="connection">[ESPERANDO] RC522</p>
 <p id="detection">[ESPERANDO] Tarjeta</p><p id="message" role="status" aria-live="polite"></p><p id="remaining"></p></section>
 <section id="attendance" hidden><h2>ASISTENCIA</h2>
@@ -610,16 +695,27 @@ label{display:block;margin:12px 0}pre,dd,output{white-space:pre-wrap;overflow-wr
 <pre id="trace"></pre></section><section><h2>ÚLTIMOS 20 INTENTOS // RAM</h2><div id="history"></div></section>
 </main><script>
 const $=id=>document.getElementById(id);
-let people=[],historyText='',current=null;
+const admin=location.pathname==='/admin'||location.pathname==='/admin/';
+let people=[],peopleLoaded=false,historyText='',presentText='',current=null;
+let bootId=null,historyRevision=null,renderedKey='',disconnected=true;
+let timer=null,syncing=false,syncAgain=false,statusController=null,actionSending=false;
+const busy=s=>!!s&&(s.pending||s.diagnosticPending||s.operation==='WRITING');
 function selectedPerson(){const p=people.find(p=>p.id===$('person').value);$('requestedId').textContent=p?p.cardId:'';$('confirm').checked=false;}
 $('person').addEventListener('change',selectedPerson);
+function showDisconnected(){
+ disconnected=true;
+ $('esp').textContent='[ERROR] Sin conexión con la ESP32';
+ for(const id of ['prepare','diagnose','resetReader','cancel','sync','initStorage'])$(id).disabled=true;
+}
 async function action(path,fields={}){
- $('requestError').textContent='';
+ if(actionSending)return;
+ actionSending=true;$('requestError').textContent='';
  try{
   const r=await fetch(path,{method:'POST',cache:'no-store',body:new URLSearchParams(fields)});
   const d=await r.json();$('requestError').textContent=(r.ok?'[OK] ':'[ERROR] ')+d.message;
   if(r.ok&&path==='/api/write')$('confirm').checked=false;
  }catch(e){$('requestError').textContent='[ERROR] No se pudo confirmar la solicitud; consultar el resultado antes de reintentar.';}
+ finally{actionSending=false;requestSync();}
 }
 $('writeForm').addEventListener('submit',e=>{e.preventDefault();action('/api/write',{personId:$('person').value,confirm:$('confirm').checked?'yes':'no'});});
 $('diagnose').onclick=()=>action('/api/diagnose');
@@ -645,49 +741,178 @@ function renderHistory(attempts){
   const p=document.createElement('pre');p.textContent=a.trace+'\n'+a.message;d.append(s,p);$('history').append(d);
  }
 }
+function renderPeople(list){
+ people=list;$('person').replaceChildren();
+ for(const p of people){const o=document.createElement('option');o.value=p.id;o.textContent=p.name+' // '+(p.teacher?'docente':'estudiante')+' // '+p.class;$('person').append(o);}
+ peopleLoaded=true;selectedPerson();
+}
+function updateCountdown(s){
+ const working=busy(s);
+ $('remaining').textContent=working?'[ESPERANDO] '+s.remainingSeconds+' segundos':'';
+ if(s.attendance){
+  const a=s.attendance,n=a.remainingSeconds,q=a.session;
+  $('countdown').textContent=a.active?'[OK] ABIERTA // '+String(Math.floor(n/60)).padStart(2,'0')+':'+String(n%60).padStart(2,'0'):'[CERRADO] '+(q?q.closeReason:'');
+ }
+}
 function render(s){
- current=s;document.title=s.mode==='escritor'?'Escritor RFID':'Asistencia RFID';
+ document.title=admin?'Administración RFID':'Asistencia RFID';
  $('title').textContent=document.title+' // TERMINAL';$('version').textContent='Firmware '+s.version+' // '+s.mode;
  $('esp').textContent='[OK] ESP32 responde';
  $('connection').textContent=s.connected?'[OK] RC522 // versión '+s.readerVersion:'[ERROR] RC522 sin respuesta';
  $('detection').textContent=s.uid?'[OK] Tarjeta detectada // '+s.uid:'[ESPERANDO] Sin tarjeta identificada en este intento';
  $('message').textContent=s.stage+': '+(s.stage.includes('ERROR')||s.stage==='TIPO_NO_COMPATIBLE'?'[ERROR] ':s.stage==='ESPERANDO_TARJETA'?'[ESPERANDO] ':'[OK] ')+s.message;
- const busy=s.pending||s.diagnosticPending;
- $('remaining').textContent=busy?'[ESPERANDO] '+s.remainingSeconds+' segundos':'';
- $('prepare').disabled=!s.connected||busy;$('diagnose').disabled=!s.connected||busy;
- $('resetReader').disabled=busy;$('cancel').disabled=!busy;
- $('writer').hidden=s.mode!=='escritor';$('attendance').hidden=s.mode!=='lector';
- if(!people.length){people=s.people;for(const p of people){const o=document.createElement('option');o.value=p.id;o.textContent=p.name+' // '+(p.teacher?'docente':'estudiante')+' // '+p.class;$('person').append(o);}selectedPerson();}
+ const working=busy(s);
+ $('prepare').disabled=!s.connected||working;$('diagnose').disabled=!s.connected||working;
+ $('resetReader').disabled=working;$('cancel').disabled=!working;
+ $('writer').hidden=!admin;$('attendance').hidden=admin;
  for(const key of ['uid','type','cardId','blockHex','expectedHex'])$(key).textContent=s[key]||'—';
- $('trace').textContent=s.trace;renderHistory(s.attempts);
+ $('trace').textContent=s.trace;
  if(s.attendance){
   const a=s.attendance,q=a.session;
   $('attendanceMessage').textContent=a.message;
   $('lesson').textContent=q?q.class+' // '+q.teacher+' // Presentes: '+q.presentStudents.length+'/3':'[CERRADO] Sin sesión';
   $('clockState').textContent=a.clockReady?'[OK] Hora sincronizada (UTC-3)':'[ESPERANDO] Sincronizar la hora del teléfono';
-  const n=a.remainingSeconds;$('countdown').textContent=a.active?'[OK] ABIERTA // '+String(Math.floor(n/60)).padStart(2,'0')+':'+String(n%60).padStart(2,'0'):'[CERRADO] '+(q?q.closeReason:'');
-  $('present').replaceChildren();for(const p of q?q.presentStudents:[]){const li=document.createElement('li');li.textContent='[OK] '+p.name+' // '+p.scannedAt;$('present').append(li);}
+  const entries=q?q.presentStudents:[];
+  const serialized=JSON.stringify(entries);
+  if(serialized!==presentText){
+   presentText=serialized;$('present').replaceChildren();
+   for(const p of entries){const li=document.createElement('li');li.textContent='[OK] '+p.name+' // '+p.scannedAt;$('present').append(li);}
+  }
   $('initialize').hidden=a.storageReady;$('sync').disabled=a.active||a.closePending;
-  $('initStorage').disabled=busy||a.storageReady;
+  $('initStorage').disabled=working||a.storageReady;
  }
 }
-async function poll(){
- try{const r=await fetch('/api/status',{cache:'no-store'});if(!r.ok)throw Error();render(await r.json());}
- catch(e){$('esp').textContent='[ERROR] Sin conexión con la ESP32';for(const id of ['prepare','diagnose','resetReader','cancel','sync','initStorage'])$(id).disabled=true;}
- finally{setTimeout(poll,500);}
+function invalidateBoot(nextBoot){
+ bootId=nextBoot;historyRevision=null;renderedKey='';historyText='';presentText='';current=null;
+ $('history').replaceChildren();$('present').replaceChildren();
+ $('trace').textContent='';$('report').value='';$('copyFallback').hidden=true;
+ $('confirm').checked=false;
+ $('esp').textContent='[ESPERANDO] Sincronizando el inicio de la ESP32';
+ for(const id of ['prepare','diagnose','resetReader','cancel','sync','initStorage'])$(id).disabled=true;
 }
-poll();
+async function fetchJson(path,signal){
+ const r=await fetch(path,{cache:'no-store',signal});if(!r.ok)throw Error('HTTP '+r.status);return r.json();
+}
+function pollDelay(){
+ return busy(current)||(current&&current.attendance&&(current.attendance.active||current.attendance.closePending))?500:2000;
+}
+function requestSync(){
+ clearTimeout(timer);timer=null;
+ if(document.hidden)return;
+ if(syncing){syncAgain=true;return;}
+ synchronize();
+}
+async function synchronize(){
+ if(syncing||document.hidden)return;
+ syncing=true;syncAgain=false;
+ const controller=new AbortController();statusController=controller;
+ const timeout=setTimeout(()=>controller.abort(),8000);
+ try{
+  const s=await fetchJson('/api/status',controller.signal);
+  if(document.hidden)return;
+  const nextBoot=String(s.bootId);
+  if(nextBoot!==bootId)invalidateBoot(nextBoot);
+  if(!peopleLoaded){
+   const data=await fetchJson('/api/people',controller.signal);
+   if(document.hidden)return;
+   renderPeople(data.people);
+  }
+  if(historyRevision!==s.historyRevision){
+   const data=await fetchJson('/api/attempts',controller.signal);
+   if(document.hidden)return;
+   // A reboot between requests invalidates this entire synchronization.
+   // A full bounded snapshot also replaces entries missed while disconnected.
+   if(String(data.bootId)!==nextBoot){invalidateBoot(String(data.bootId));syncAgain=true;return;}
+   renderHistory(data.attempts);historyRevision=data.historyRevision;
+  }
+  const key=nextBoot+':'+s.stateRevision;
+  if(disconnected||renderedKey!==key){render(s);renderedKey=key;}
+  current=s;updateCountdown(s);disconnected=false;
+ }catch(e){if(!document.hidden)showDisconnected();}
+ finally{
+  clearTimeout(timeout);statusController=null;syncing=false;
+  if(!document.hidden){const delay=syncAgain?0:pollDelay();syncAgain=false;timer=setTimeout(requestSync,delay);}
+ }
+}
+document.addEventListener('visibilitychange',()=>{
+ if(document.hidden){clearTimeout(timer);timer=null;if(statusController)statusController.abort();}
+ else requestSync();
+});
+window.addEventListener('online',requestSync);
+window.addEventListener('offline',()=>{
+ clearTimeout(timer);timer=null;
+ if(statusController)statusController.abort();
+ showDisconnected();
+});
+requestSync();
 </script></html>
 )HTML";
 
 void sendStatus(){
  server.sendHeader("Cache-Control","no-store");
- server.send(200,"application/json; charset=utf-8",commonStatus("lector")+",\"attendance\":"+attendanceJson()+"}");
+ server.send(200,"application/json; charset=utf-8",commonStatus("rfid")+",\"attendance\":"+attendanceJson()+"}");
 }
+void prepareWrite(){
+ if(operationBusy()){reply(409,"Hay una operación pendiente.");return;}
+ const int person=personById(server.arg("personId"));
+ if(person<0){reply(400,"Solo se admiten las ocho personas fijas.");return;}
+ if(server.arg("confirm")!="yes"){reply(400,"Falta confirmar la sobrescritura.");return;}
+ if(!checkReader(true)){reply(503,"El RC522 no responde.");return;}
+ beginAttempt("ESCRITURA");
+ suppressAttendance=true;
+ requestedId=PEOPLE[person].card;
+ armedAtMs=millis();waitingNotice=false;setOperation(OperationState::WAIT_WRITE);
+ report("ESPERANDO_TARJETA","Acercar tarjeta para "+String(PEOPLE[person].name)+" // "+requestedId);
+ reply(202,"Escritura preparada.");
+}
+void writeSelectedCard() {
+  if(!validCardId(requestedId)){
+    report("ERROR_ESCRITURA","Card ID inválido; no se escribió la tarjeta.");releaseCard();return;
+  }
+  describeCard();
+  if (!authenticate()) { releaseCard(); return; }
+
+  byte previous[16];
+  report("LECTURA_PREVIA", "Leyendo el bloque 4 antes de modificarlo.");
+  if (!readBlock(previous)) { releaseCard(); return; }
+  report("CONTENIDO_PREVIO", blockHex);
+
+  byte desired[16] = {0};
+  for (size_t i = 0; i < requestedId.length(); ++i)
+    desired[i] = static_cast<byte>(requestedId[i]);
+  expectedHex = hexBytes(desired, sizeof(desired));
+  report("ESCRIBIENDO", "Sobrescribiendo solamente el bloque de datos 4.");
+  const auto status = rfid.MIFARE_Write(DATA_BLOCK, desired, sizeof(desired));
+  if (status != MFRC522::STATUS_OK) {
+    report("ERROR_ESCRITURA", "No se confirmo la escritura. Comprobar la tarjeta con el lector. " +
+           String(rfid.GetStatusCodeName(status)));
+    releaseCard();
+    return;
+  }
+
+  byte actual[16];
+  report("VERIFICANDO", "Volviendo a leer el bloque 4 y comparando los 16 bytes.");
+  // Do not display the previous content as if it were a successful verification.
+  blockHex = ""; cardId = "";
+  if (!readBlock(actual)) {
+    report("ERROR_VERIFICACION", "La escritura fue enviada, pero no se pudo releer. Comprobar con el lector.");
+  } else if (memcmp(actual, desired, sizeof(desired)) != 0) {
+    report("ERROR_VERIFICACION", "El contenido leido no coincide con los 16 bytes solicitados.");
+  } else {
+    report("ESCRITURA_OK", "Card ID escrito y verificado: " + cardId +
+           ". Retirar la tarjeta antes de usarla para asistencia.");
+  }
+  releaseCard();
+}
+
+
 void setup(){
  setenv("TZ","UYT3",1);tzset();
- beginHardware("RFID-Lector");beginAttendanceStorage();
+ beginHardware("RFID-ESP32");beginAttendanceStorage();
  server.on("/",HTTP_GET,[]{server.sendHeader("Cache-Control","no-store");server.send_P(200,"text/html; charset=utf-8",PAGE);});
+ server.on("/admin",HTTP_GET,[]{server.sendHeader("Cache-Control","no-store");server.send_P(200,"text/html; charset=utf-8",PAGE);});
+ server.on("/admin/",HTTP_GET,[]{server.sendHeader("Cache-Control","no-store");server.send_P(200,"text/html; charset=utf-8",PAGE);});
+ server.on("/api/write",HTTP_POST,prepareWrite);
  server.on("/api/status",HTTP_GET,sendStatus);
  server.on("/api/time",HTTP_POST,synchronizeClock);
  server.on("/api/storage/init",HTTP_POST,initializeStorage);
@@ -695,7 +920,7 @@ void setup(){
  registerCommonRoutes();server.onNotFound([]{reply(404,"Ruta inexistente.");});server.begin();
 }
 void loop(){
- server.handleClient();tickAttendance();
+ tickAttendance();server.handleClient();tickAttendance();
  const bool connected=checkReader();
  if(pollManual(connected))return;
  if(!connected){lastCardUid="";return;}

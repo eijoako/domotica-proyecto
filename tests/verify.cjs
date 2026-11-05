@@ -20,7 +20,6 @@ class Firmware {
     const args = ['-std=c++17', '-Wall', '-Wextra', '-Werror', '-g',
       '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
       '-I'+path.join(__dirname, 'fakes'), path.join(__dirname, 'driver.cpp'), '-o', binary];
-    if(mode === 'escritor') args.push('-DTEST_WRITER');
     const result = spawnSync('g++', args, {encoding:'utf8'});
     assert.equal(result.status, 0, result.stderr);
     this.pending = [];
@@ -49,6 +48,8 @@ class Firmware {
   card(present,bytes='-') {return this.command('CARD '+Number(present)+' '+bytes);}
   tick(ms=101) {return this.command('TIME '+ms);}
   get(route='/api/status') {return this.command('HTTP GET '+route);}
+  async people(){return JSON.parse((await this.get('/api/people')).response).people;}
+  async history(){return JSON.parse((await this.get('/api/attempts')).response);}
   post(route,id='',confirm='') {
     return this.command('HTTP POST '+route+' '+hex(id)+' '+hex(confirm));
   }
@@ -193,10 +194,10 @@ async function nativeTests(writer,reader) {
     await reader.card(false);await reader.tick(500);await reader.card(true,'01'.repeat(16));
     r=await reader.tick();assert.equal(r.status.cardId,'');assert(r.status.blockHex.length>0);
   });
-  await check('reader rejects writing endpoints',async()=>{
+  await check('unified writer rejects unconfirmed writes',async()=>{
     await reader.reset();await reader.card(true);
     const r=await reader.post('/api/write','HACK','yes');
-    assert.equal(r.code,404);assert.equal(r.attempts,0);
+    assert.equal(r.code,400);assert.equal(r.attempts,0);
   });
   for(const firmware of [reader,writer])await check('bounded escaped JSON log '+(firmware===reader?'reader':'writer'),async()=>{
     await firmware.reset();const r=await firmware.command('LOG 5000');
@@ -223,11 +224,11 @@ async function newFeatureTests(writer,reader){
   await reader.config('detectFail',true);expectStage(await reader.tick(),'ERROR_DETECCION');
   await reader.config('detectFail',false);expectStage(await reader.tick(),'LECTURA_OK');
   await reader.config('detectFail',true);const r=await reader.tick();
-  expectStage(r,'ERROR_DETECCION');assert.equal(r.status.attempts[0].stage,'ERROR_DETECCION');
+  expectStage(r,'ERROR_DETECCION');assert.equal((await reader.history()).attempts[0].stage,'ERROR_DETECCION');
  });
  await check('fixed roster is identical and immutable',async()=>{
   await writer.reset();await reader.reset();
-  const a=(await writer.get()).status.people,b=(await reader.get()).status.people;
+  const a=await writer.people(),b=await reader.people();
   assert.deepEqual(a,b);assert.equal(a.length,8);assert.equal(a.filter(x=>x.teacher).length,2);
   assert.equal(new Set(a.map(x=>x.cardId)).size,8);
   for(const f of [writer,reader])for(const route of ['/api/admin/student','/api/admin/teacher','/api/admin/class'])
@@ -240,15 +241,15 @@ async function newFeatureTests(writer,reader){
   expectStage(r,'LECTURA_OK');assert.equal(r.attempts,0);assert(!r.status.diagnosticPending);
   if(before)assert.equal(r.status.attendance.active,false);
   await f.tick();if(before)assert.equal((await f.get()).status.attendance.active,false);
-  assert.equal(r.status.attempts[0].kind,'DIAGNOSTICO');
+  assert.equal((await f.history()).attempts[0].kind,'DIAGNOSTICO');
  });
  for(const f of [writer,reader])await check('20 attempts and copy report '+(f===writer?'writer':'reader'),async()=>{
   await f.reset();const r=await f.command('ATTEMPTS 35');
-  assert.equal(r.status.attempts.length,20);assert.equal(r.status.attempts[0].number,35);assert.equal(r.status.attempts[19].number,16);
+  const h=await f.history();assert.equal(h.attempts.length,20);assert.equal(h.attempts[0].number,35);assert.equal(h.attempts[19].number,16);
   const report=(await f.get('/api/diagnostic/report')).response;
   assert(report.includes('Intento 35'));assert(!report.includes('Intento 15 /'));
   assert.equal((await f.post('/api/reader/reset')).code,200);
-  assert.equal((await f.get()).status.attempts.length,20);
+  assert.equal((await f.history()).attempts.length,20);
  });
  await check('reset and diagnostic rejected during pending write',async()=>{
   await writer.reset();await writer.arm();
@@ -335,20 +336,208 @@ async function newFeatureTests(writer,reader){
  });
 }
 
+
+async function unifiedTests(reader){
+ await check('single firmware serves attendance and both admin paths',async()=>{
+  await reader.reset();
+  for(const route of ['/','/admin','/admin/'])assert.equal((await reader.get(route)).code,200);
+  assert.equal((await reader.get()).status.mode,'rfid');
+ });
+ await check('one initialization and settling time on startup, reset and recovery',async()=>{
+  let r=await reader.reset();assert.equal(r.initializations,1);assert.equal(r.earlyProbes,0);
+  r=await reader.post('/api/reader/reset');assert.equal(r.initializations,2);assert.equal(r.earlyProbes,0);
+  await reader.config('version',0);await reader.tick(2001);
+  await reader.config('version',146);r=await reader.tick(2001);
+  assert(r.status.connected);assert.equal(r.earlyProbes,0);
+ });
+ await check('writing during a class preserves attendance and suppresses held card',async()=>{
+  await openClass(reader);await scan(reader,'ALU_01');
+  await reader.card(false);await reader.tick(501);await reader.arm('ALU_02');
+  await reader.card(true,cardBlock('OLD'));let r=await reader.tick();expectStage(r,'ESCRITURA_OK');
+  assert.equal(r.status.attendance.session.presentStudents.length,1);
+  r=await reader.tick(1000);assert.equal(r.status.attendance.session.presentStudents.length,1);
+  r=await scan(reader,'ALU_02');assert.equal(r.status.attendance.session.presentStudents.length,2);
+ });
+ await check('pending administration cannot postpone the attendance deadline',async()=>{
+  await openClass(reader);await reader.card(false);await reader.tick(599000);
+  await reader.arm('ALU_01');const r=await reader.tick(1001);
+  assert(r.status.pending);assert(!r.status.attendance.active);
+  assert.equal(r.status.attendance.session.closeReason,'TIMEOUT');
+ });
+ await check('cancelled writing cannot turn an administrative card into attendance',async()=>{
+  await openClass(reader);await reader.arm('ALU_01');
+  await reader.card(true,cardBlock(CARDS.ALU_01));await reader.post('/api/cancel');
+  const r=await reader.tick();assert.equal(r.writes,0);
+  assert.equal(r.status.attendance.session.presentStudents.length,0);
+ });
+ await check('two admin clients cannot replace the pending identity',async()=>{
+  await reader.reset();const results=await Promise.all([reader.arm('ALU_01'),reader.arm('ALU_02')]);
+  assert.deepEqual(results.map(r=>r.code),[202,409]);
+  assert.equal((await reader.get()).status.requestedId,CARDS.ALU_01);
+ });
+ for(const size of [0,3,11,255])for(const writing of [false,true])
+  await check('reject invalid UID size '+size+' writing='+writing,async()=>{
+   await reader.reset();await reader.config('uidSize',size);await reader.card(true);
+   if(writing)await reader.arm();
+   const r=await reader.tick();expectStage(r,'ERROR_SELECCION');assert.equal(r.reads,0);assert.equal(r.writes,0);
+  });
+ for(const writing of [false,true])await check('reject oversized block length writing='+writing,async()=>{
+  await reader.reset();await reader.config('oversizedRead',true);await reader.card(true);
+  if(writing)await reader.arm();
+  const r=await reader.tick();expectStage(r,'ERROR_LECTURA');assert.equal(r.writes,0);
+ });
+}
+
+async function optimizationTests(writer,reader){
+ for(const f of [writer,reader]){
+  const name=f===writer?'writer':'reader';
+  await check('lightweight status and separated immutable people '+name,async()=>{
+   await f.reset();let r=await f.get();
+   assert(!Object.hasOwn(r.status,'people'));assert(!Object.hasOwn(r.status,'attempts'));
+   assert.equal(typeof r.status.bootId,'string');assert(r.status.bootId.length);
+   assert.equal(typeof r.status.stateRevision,'number');assert.equal(typeof r.status.historyRevision,'number');
+   assert.equal(r.status.operation,'IDLE');
+   const p=await f.get('/api/people');assert.equal(p.code,200);assert.equal(JSON.parse(p.response).people.length,8);
+   assert(p.historyUnchanged);
+  });
+  await check('GET cannot copy/mutate an unfinished attempt '+name,async()=>{
+   await f.reset();await f.post('/api/diagnose');
+   const before=await f.history(),revision=(await f.get()).status.historyRevision;
+   assert.equal(before.attempts[0].stage,'EN_CURSO');
+   for(let n=0;n<10;++n)for(const route of ['/api/status','/api/people','/api/attempts','/api/diagnostic/report']){
+    const r=await f.get(route);assert(r.historyUnchanged,'GET mutated snapshots: '+route);
+    assert.equal(r.status.historyRevision,revision);
+   }
+   assert.deepEqual(await f.history(),before);
+  });
+  await check('two clients have independent full snapshot recovery '+name,async()=>{
+   await f.reset();await f.command('ATTEMPTS 4');
+   const [a,b]=await Promise.all([f.history(),f.history()]);assert.deepEqual(a,b);
+   await f.command('ATTEMPTS 25');
+   const [newA,newB]=await Promise.all([f.history(),f.history()]);
+   assert.deepEqual(newA,newB);assert.equal(newA.attempts.length,20);
+   assert.equal(newA.oldestSequence,10);assert.equal(newA.newestSequence,29);
+   assert(newA.historyRevision>a.historyRevision);
+   assert.equal(new Set(newA.attempts.map(x=>x.number)).size,20);
+  });
+  await check('reboot invalidates revisions and old client history '+name,async()=>{
+   await f.reset();await f.command('ATTEMPTS 30');const old=await f.history();
+   const r=await f.command('REBOOT'),fresh=await f.history();
+   assert.notEqual(r.status.bootId,old.bootId);assert.equal(fresh.bootId,r.status.bootId);
+   assert.equal(fresh.attempts.length,0);assert.equal(fresh.oldestSequence,0);assert.equal(fresh.newestSequence,0);
+  });
+  await check('thousands of attempts keep bounded history and frequent body '+name,async()=>{
+   await f.reset();await f.command('ATTEMPTS 20');const before=await f.get();
+   await f.command('ATTEMPTS 5000');const after=await f.get(),h=await f.history();
+   assert.equal(h.attempts.length,20);assert.equal(h.newestSequence,5020);
+   assert.equal(h.oldestSequence,5001);assert.equal(new Set(h.attempts.map(x=>x.number)).size,20);
+   assert(Buffer.byteLength(after.response)<8000);
+   assert(Math.abs(Buffer.byteLength(after.response)-Buffer.byteLength(before.response))<64);
+   for(const a of h.attempts)assert(Buffer.byteLength(a.trace)<=1600);
+   assert(Buffer.byteLength(JSON.stringify(h))<60000);
+  });
+ }
+ await check('operation state transitions keep countdown outside revision',async()=>{
+  await writer.reset();let r=await writer.arm();assert.equal(r.status.operation,'WAIT_WRITE');
+  const revision=r.status.stateRevision;r=await writer.tick(1000);
+  assert.equal(r.status.operation,'WAIT_WRITE');assert.equal(r.status.stateRevision,revision);
+  assert.equal(r.status.remainingSeconds,59);
+  r=await writer.post('/api/cancel');assert.equal(r.status.operation,'IDLE');
+  r=await writer.post('/api/diagnose');assert.equal(r.status.operation,'WAIT_DIAGNOSTIC');
+ });
+ await check('streaming export evaluates class deadline without HTTP reentry',async()=>{
+  await openClass(reader);await scan(reader,'ALU_01');await reader.tick(600000);
+  await scan(reader,'PROF_02');await scan(reader,'ALU_04');
+  await reader.config('streamAdvance',200001);
+  const r=await reader.get('/api/attendance/export');
+  assert.equal(r.code,200);assert(r.streamChunks>=3);
+  assert.equal(r.httpReentered,false);
+  assert.equal(r.status.attendance.active,false);assert.equal(r.status.attendance.session.closeReason,'TIMEOUT');
+  assert.equal(r.status.attendance.session.presentStudents.length,1);
+  await reader.config('streamAdvance',0);
+ });
+ await check('legacy 84-byte record is read without migration',async()=>{
+  await reader.reset();
+  const fixture=fs.readFileSync(path.join(__dirname,'fixtures','attendance-v1.hex'),'utf8').trim();
+  assert.equal(fixture.length,168);await reader.command('LOADRECORD '+fixture);
+  const r=await reader.command('REBOOT'),session=r.status.attendance.session;
+  assert.equal(r.status.attendance.storageReady,true);
+  assert.equal(session.teacherId,'PROF_01');assert.equal(session.class,'Ingeniería');
+  assert.equal(session.closeReason,'TIMEOUT');assert.equal(session.openedAt,'2027-01-15T05:00:00-03:00');
+  assert.equal(session.closedAt,'2027-01-15T05:10:00-03:00');
+  assert.deepEqual(session.presentStudents,[{id:'ALU_01',name:'Lucía Fernández',scannedAt:'2027-01-15T05:00:02-03:00'}]);
+  assert.equal(r.formats,0);
+ });
+ await check('25-record export cannot defer timeout or recursively serve HTTP',async()=>{
+  await reader.reset();await reader.post('/api/time','1800000000');
+  for(let i=0;i<24;++i){await scan(reader,i%2?'PROF_02':'PROF_01');await scan(reader,i%2?'ALU_04':'ALU_01');await reader.tick(600000);}
+  await scan(reader,'PROF_01');await scan(reader,'ALU_01');
+  await reader.config('streamAdvance',25000);
+  const r=await reader.get('/api/attendance/export');
+  assert.equal(r.response.trim().split('\n').length,25);
+  assert(r.streamChunks>=26);assert.equal(r.httpReentered,false);
+  assert.equal(r.status.attendance.active,false);assert.equal(r.status.attendance.session.closeReason,'TIMEOUT');
+  await reader.config('streamAdvance',0);
+ });
+ await check('cooperative stream handles partial writes and bounded batches',async()=>{
+  await reader.reset();await reader.command('ATTEMPTS 20');
+  const expected=await reader.history();await reader.config('networkPartial',3);
+  const r=await reader.get('/api/attempts');assert.equal(r.transportComplete,true);assert.equal(r.transportClosed,false);
+  assert.deepEqual(JSON.parse(r.response),expected);assert(r.maxWriteBatch<=512);assert(r.socketCalls>20);
+  await reader.config('networkPartial',0);
+ });
+ await check('EAGAIN serves attendance deadline and aborts stalled receiver',async()=>{
+  await openClass(reader);await scan(reader,'ALU_01');await reader.tick(599200);
+  await reader.config('networkStall',true);const before=(await reader.command('STATUS')).nowMs;
+  const r=await reader.get('/api/attendance/export');
+  assert(r.transportClosed);assert(!r.transportComplete);assert.equal(r.httpReentered,false);
+  assert.equal(r.status.attendance.active,false);assert.equal(r.status.attendance.session.closeReason,'TIMEOUT');
+  assert(r.nowMs-before<=400,'Stalled send was not bounded by the no-progress budget');
+  await reader.config('networkStall',false);
+ });
+ await check('slow progressing receiver is bounded by total-write budget',async()=>{
+  await openClass(reader);await scan(reader,'ALU_01');
+  await reader.config('networkPartial',1);await reader.config('networkAdvance',100);
+  const before=(await reader.command('STATUS')).nowMs;
+  const r=await reader.get('/api/attendance/export');
+  assert(r.transportClosed);assert(!r.transportComplete);assert.equal(r.httpReentered,false);
+  assert(r.nowMs-before<=2700,'Progressing send exceeded its bounded frame/body budget');
+  await reader.config('networkPartial',0);await reader.config('networkAdvance',0);
+ });
+ for(const fault of ['networkFail','networkZero'])await check('cooperative stream closes on '+fault,async()=>{
+  await reader.reset();await reader.command('ATTEMPTS 1');await reader.config(fault,true);
+  const r=await reader.get('/api/attempts');assert(r.transportClosed);assert(!r.transportComplete);assert.equal(r.httpReentered,false);
+  await reader.config(fault,false);
+ });
+ await check('cooperative stream retries a transient EINTR',async()=>{
+  await reader.reset();await reader.command('ATTEMPTS 1');await reader.config('networkInterrupts',1);
+  const r=await reader.get('/api/attempts');assert(r.transportComplete);assert(!r.transportClosed);
+  assert.equal(JSON.parse(r.response).attempts.length,1);assert(r.socketCalls>1);
+ });
+}
+
 async function serve(firmware) {
+  const stats={counts:{},statusActive:0,maxStatusActive:0,statusDelay:0};
   const server=http.createServer(async(req,res)=>{
+    stats.counts[req.url]=(stats.counts[req.url]||0)+1;
+    const isStatus=req.url==='/api/status';
+    if(isStatus){++stats.statusActive;stats.maxStatusActive=Math.max(stats.maxStatusActive,stats.statusActive);}
+    let finished=false;
+    const done=()=>{if(!finished&&isStatus)--stats.statusActive;finished=true;};
+    res.once('finish',done);res.once('close',done);
     try {
+      if(isStatus&&stats.statusDelay)await new Promise(resolve=>setTimeout(resolve,stats.statusDelay));
       let body='';for await(const chunk of req) body+=chunk;
       const fields=new URLSearchParams(body);
       const result=req.method==='POST'?
         await firmware.post(req.url,fields.get('personId')||fields.get('epoch')||fields.get('confirmation')||'',fields.get('confirm')||''):
         await firmware.get(req.url);
-      res.writeHead(result.code,{'Content-Type':req.url==='/'?'text/html; charset=utf-8':'application/json; charset=utf-8','Cache-Control':result.cache});
+      res.writeHead(result.code,{'Content-Type':['/','/admin','/admin/'].includes(req.url)?'text/html; charset=utf-8':'application/json; charset=utf-8','Cache-Control':result.cache});
       res.end(result.response);
     } catch(error) {res.writeHead(500);res.end(String(error));}
   });
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
-  return {url:'http://127.0.0.1:'+server.address().port,close:()=>new Promise(resolve=>server.close(resolve))};
+  return {url:'http://127.0.0.1:'+server.address().port,stats,close:()=>new Promise(resolve=>server.close(resolve))};
 }
 
 
@@ -362,7 +551,8 @@ async function browserTests(writer,reader) {
  const stage=expected=>page.waitForFunction(text=>document.getElementById('message').textContent.startsWith(text+':'),expected);
  const ready=()=>page.waitForFunction(()=>!document.getElementById('prepare').disabled);
  try{
-  await writer.reset();await page.goto(w.url);await ready();
+  await writer.reset();await page.goto(w.url+'/admin');await ready();
+  assert(await page.locator('#writer').isVisible());assert(await page.locator('#attendance').isHidden());
   assert.equal(await page.locator('#person option').count(),8);
   assert.equal(await page.locator('input[name=cardId]').count(),0);
   await page.locator('#person').selectOption('ALU_01');await page.getByRole('checkbox').check();
@@ -384,12 +574,17 @@ async function browserTests(writer,reader) {
   assert.equal(await page.locator('#report').evaluate(el=>getComputedStyle(el,'::selection').backgroundColor),'rgb(255, 255, 255)');
   assert.equal(await page.locator('#report').evaluate(el=>getComputedStyle(el,'::selection').color),'rgb(0, 0, 0)');
   await page.evaluate(()=>Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:async text=>{window.copied=text;}}}));
-  await page.locator('#copy').click();await page.waitForFunction(()=>window.copied&&window.copied.includes('3.0.0'));
+  await page.locator('#copy').click();await page.waitForFunction(()=>window.copied&&window.copied.includes('RFID'));
   const css=await page.locator('style').textContent();
   assert.deepEqual([...new Set(css.match(/#[A-Fa-f0-9]{6}/g))].sort(),['#000000','#FFFFFF']);
   assert.equal(await page.locator('body').evaluate(el=>getComputedStyle(el).backgroundColor),'rgb(0, 0, 0)');
   assert.equal(await page.locator('button:disabled').first().evaluate(el=>getComputedStyle(el).opacity),'1');
   await page.screenshot({path:path.join(output,'escritor-mobile.png'),fullPage:true});
+  const boot=(await writer.get()).status.bootId;
+  await page.getByRole('link',{name:'Asistencia',exact:true}).click();
+  await page.waitForFunction(()=>!document.getElementById('attendance').hidden);
+  assert(await page.locator('#writer').isHidden());assert.equal((await writer.get()).status.bootId,boot);
+  await page.getByRole('link',{name:'Administrar tarjetas',exact:true}).click();await ready();
   await writer.card(false);await ready();await page.getByRole('checkbox').check();await page.locator('#prepare').click();await stage('ESPERANDO_TARJETA');
   await page.locator('#cancel').click();await stage('CANCELADO');
   await page.route('**/api/status',route=>route.abort());
@@ -412,14 +607,84 @@ async function browserTests(writer,reader) {
  }finally{await page.close();await browser.close();await w.close();await r.close();}
 }
 
+
+async function browserOptimizationTests(writer) {
+ const {chromium}=require('playwright');
+ const browser=await chromium.launch({executablePath:process.env.CHROMIUM_PATH||(fs.existsSync('/usr/bin/chromium')?'/usr/bin/chromium':undefined),headless:true,args:['--no-sandbox']});
+ const service=await serve(writer),page=await browser.newPage({viewport:{width:390,height:844}});
+ const errors=[];page.on('pageerror',e=>errors.push(String(e)));
+ const pending=new Set();let peak=0;
+ page.on('request',req=>{if(new URL(req.url()).pathname==='/api/status'){pending.add(req);peak=Math.max(peak,pending.size);}});
+ const done=req=>pending.delete(req);page.on('requestfinished',done);page.on('requestfailed',done);
+ const online=()=>page.evaluate(()=>window.dispatchEvent(new Event('online')));
+ const ready=()=>page.waitForFunction(()=>!document.getElementById('prepare').disabled);
+ try{
+  await writer.reset();await page.goto(service.url+'/admin');await ready();
+  assert.equal(service.stats.counts['/api/people'],1);
+  const historyRequests=service.stats.counts['/api/attempts'];
+  await page.evaluate(()=>{
+   window.unnecessaryDomChanges=0;
+   const observer=new MutationObserver(records=>{window.unnecessaryDomChanges+=records.length;});
+   for(const id of ['message','trace','history'])observer.observe(document.getElementById(id),{childList:true,subtree:true,characterData:true});
+  });
+  await page.waitForTimeout(2300);
+  assert.equal(service.stats.counts['/api/people'],1);
+  assert.equal(service.stats.counts['/api/attempts'],historyRequests);
+  assert.equal(await page.evaluate(()=>window.unnecessaryDomChanges),0);
+  service.stats.statusDelay=700;
+  await page.evaluate(()=>{for(let i=0;i<12;++i)window.dispatchEvent(new Event('online'));});
+  await page.waitForTimeout(1800);
+  assert.equal(peak,1,'A page overlapped its status requests');
+  service.stats.statusDelay=0;
+  await page.route('**/api/status',route=>route.abort());await online();
+  await page.waitForFunction(()=>document.getElementById('esp').textContent.includes('Sin conexión'));
+  await writer.command('ATTEMPTS 40');
+  const snapshot=await writer.history();
+  await page.unroute('**/api/status');await online();await ready();
+  await page.waitForFunction(()=>document.querySelectorAll('#history details').length===20);
+  const numbers=await page.locator('#history details').evaluateAll(nodes=>nodes.map(n=>Number(n.dataset.number)));
+  assert.deepEqual(numbers,snapshot.attempts.map(x=>x.number));
+  assert.equal(new Set(numbers).size,20);
+  await page.route('**/api/status',route=>route.abort());await online();
+  await page.waitForFunction(()=>document.getElementById('esp').textContent.includes('Sin conexión'));
+  await writer.command('REBOOT');
+  await page.unroute('**/api/status');await online();await ready();
+  await page.waitForFunction(()=>document.querySelectorAll('#history details').length===0);
+  assert.equal(await page.locator('#confirm').isChecked(),false);
+  assert.equal(service.stats.counts['/api/people'],1,'Static roster was refetched on reconnect');
+  await page.evaluate(()=>{Object.defineProperty(document,'hidden',{configurable:true,value:true});document.dispatchEvent(new Event('visibilitychange'));});
+  await page.waitForTimeout(100);
+  const beforeHidden=service.stats.counts['/api/status'];
+  await page.waitForTimeout(2200);assert.equal(service.stats.counts['/api/status'],beforeHidden);
+  await page.evaluate(()=>{Object.defineProperty(document,'hidden',{configurable:true,value:false});document.dispatchEvent(new Event('visibilitychange'));});
+  await page.waitForFunction(()=>document.getElementById('esp').textContent.includes('[OK]'));
+  await page.waitForTimeout(150);
+  assert(service.stats.counts['/api/status']>beforeHidden,'Visible tab did not synchronize immediately');
+  const second=await browser.newPage();
+  try{
+   await second.goto(service.url+'/admin');await second.waitForFunction(()=>!document.getElementById('prepare').disabled);
+   await writer.command('ATTEMPTS 1');
+   await Promise.all([online(),second.evaluate(()=>window.dispatchEvent(new Event('online')))]);
+   for(const client of [page,second])await client.waitForFunction(()=>document.querySelectorAll('#history details').length===1);
+   assert.equal(await page.locator('#history details').getAttribute('data-number'),await second.locator('#history details').getAttribute('data-number'));
+  }finally{await second.close();}
+  assert.deepEqual(errors,[]);
+  console.log('Chromium optimization: roster once, history revisions, stable DOM, single-flight, reconnect, reboot, visibility and two clients passed');
+ }finally{await page.close();await browser.close();await service.close();}
+}
+
 (async()=>{
  let writer,reader;
  try {
   writer=new Firmware('escritor');reader=new Firmware('lector');
   await nativeTests(writer,reader);
   await newFeatureTests(writer,reader);
+  await unifiedTests(reader);
+  await optimizationTests(writer,reader);
   if(!process.argv.includes('--native-only')&&!failures.length)
     await check('real browser end-to-end',()=>browserTests(writer,reader));
+  if(!process.argv.includes('--native-only')&&!failures.length)
+    await check('browser optimized synchronization',()=>browserOptimizationTests(writer));
   console.log(passed+' checks passed; '+failures.length+' failed. Artifacts: '+output);
  } finally {if(writer)await writer.stop();if(reader)await reader.stop();}
  if(failures.length)process.exitCode=1;

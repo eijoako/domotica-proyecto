@@ -1,0 +1,298 @@
+{
+  "method": {
+    "machine": "x86_64",
+    "compiler": "g++ (Debian 14.2.0-19) 14.2.0",
+    "flags": [
+      "-std=c++17",
+      "-O2",
+      "-DNDEBUG"
+    ],
+    "warmup": 100,
+    "iterationsPerSample": 10000,
+    "samples": 5,
+    "clock": "std::chrono::steady_clock",
+    "fakeString": "std::string adapter in tests/fakes/Arduino.h",
+    "note": "Same final fake headers for both commits; std::string adapter, host-only evidence, not ESP32 heap/fragmentation or physical performance.",
+    "measured": "Pure status body expression (commonStatus + reader attendanceJson + closing brace), consumed via volatile length; no WebServer/socket transport timing"
+  },
+  "originalHandlerBaseline": {
+    "commit": "9e4434c66f8eaa7c138803b3320551efd3c127bc",
+    "firmware": "3.0.0",
+    "method": {
+      "machine": "x86_64",
+      "compiler": "g++ (Debian 14.2.0-19) 14.2.0",
+      "flags": [
+        "-std=c++17",
+        "-O2",
+        "-DNDEBUG"
+      ],
+      "warmup": 100,
+      "iterationsPerSample": 10000,
+      "samples": 5,
+      "clock": "std::chrono::steady_clock",
+      "fakeString": "std::string adapter in tests/fakes/Arduino.h",
+      "note": "Host-only serialization including fake WebServer response copy; not ESP32 performance, heap, fragmentation, RF or network latency. Bytes are JSON body only."
+    },
+    "results": {
+      "lector": [
+        {
+          "attempts": 0,
+          "dense": false,
+          "statusBytes": 1350,
+          "statusUs": [
+            10.6754,
+            10.6461,
+            10.4362,
+            10.6209,
+            10.5962
+          ]
+        },
+        {
+          "attempts": 20,
+          "dense": false,
+          "statusBytes": 5624,
+          "statusUs": [
+            47.2228,
+            47.5052,
+            46.8911,
+            48.6251,
+            46.9629
+          ]
+        },
+        {
+          "attempts": 20,
+          "dense": true,
+          "statusBytes": 42604,
+          "statusUs": [
+            229.809,
+            230.544,
+            233.769,
+            234.258,
+            234.42
+          ]
+        }
+      ],
+      "escritor": [
+        {
+          "attempts": 0,
+          "dense": false,
+          "statusBytes": 1179,
+          "statusUs": [
+            9.57465,
+            9.65378,
+            9.49636,
+            9.38772,
+            9.34451
+          ]
+        },
+        {
+          "attempts": 20,
+          "dense": false,
+          "statusBytes": 5453,
+          "statusUs": [
+            45.9274,
+            46.5879,
+            48.5419,
+            46.3792,
+            45.6891
+          ]
+        },
+        {
+          "attempts": 20,
+          "dense": true,
+          "statusBytes": 42433,
+          "statusUs": [
+            227.966,
+            280.974,
+            262.218,
+            233.349,
+            238.045
+          ]
+        }
+      ]
+    }
+  },
+  "baseline": {
+    "lector": [
+      {
+        "attempts": 0,
+        "dense": false,
+        "statusBytes": 1350,
+        "peopleBytes": 0,
+        "historyBytes": 0,
+        "statusUs": [
+          11.0088,
+          10.9399,
+          10.7748,
+          10.9325,
+          11.1157
+        ]
+      },
+      {
+        "attempts": 20,
+        "dense": false,
+        "statusBytes": 5624,
+        "peopleBytes": 0,
+        "historyBytes": 0,
+        "statusUs": [
+          49.8825,
+          49.0721,
+          51.4316,
+          49.0806,
+          50.1837
+        ]
+      },
+      {
+        "attempts": 20,
+        "dense": true,
+        "statusBytes": 42604,
+        "peopleBytes": 0,
+        "historyBytes": 0,
+        "statusUs": [
+          245.617,
+          263.513,
+          245.555,
+          246.048,
+          258.242
+        ]
+      }
+    ],
+    "escritor": [
+      {
+        "attempts": 0,
+        "dense": false,
+        "statusBytes": 1179,
+        "peopleBytes": 0,
+        "historyBytes": 0,
+        "statusUs": [
+          8.81345,
+          9.12594,
+          8.9267,
+          8.85052,
+          9.17638
+        ]
+      },
+      {
+        "attempts": 20,
+        "dense": false,
+        "statusBytes": 5453,
+        "peopleBytes": 0,
+        "historyBytes": 0,
+        "statusUs": [
+          44.6693,
+          49.4846,
+          50.6613,
+          47.4652,
+          45.191
+        ]
+      },
+      {
+        "attempts": 20,
+        "dense": true,
+        "statusBytes": 42433,
+        "peopleBytes": 0,
+        "historyBytes": 0,
+        "statusUs": [
+          222.655,
+          204.034,
+          203.411,
+          216.921,
+          208.504
+        ]
+      }
+    ]
+  },
+  "optimized": {
+    "lector": [
+      {
+        "attempts": 0,
+        "dense": false,
+        "statusBytes": 611,
+        "peopleBytes": 800,
+        "historyBytes": 90,
+        "statusUs": [
+          5.30526,
+          5.09071,
+          5.00185,
+          5.16072,
+          13.4517
+        ]
+      },
+      {
+        "attempts": 20,
+        "dense": false,
+        "statusBytes": 577,
+        "peopleBytes": 800,
+        "historyBytes": 4402,
+        "statusUs": [
+          4.99832,
+          5.26108,
+          5.41034,
+          5.32025,
+          5.38661
+        ]
+      },
+      {
+        "attempts": 20,
+        "dense": true,
+        "statusBytes": 3758,
+        "peopleBytes": 800,
+        "historyBytes": 38202,
+        "statusUs": [
+          14.9823,
+          15.0743,
+          15.7805,
+          15.5238,
+          16.1159
+        ]
+      }
+    ],
+    "escritor": [
+      {
+        "attempts": 0,
+        "dense": false,
+        "statusBytes": 440,
+        "peopleBytes": 800,
+        "historyBytes": 90,
+        "statusUs": [
+          4.13117,
+          3.7226,
+          4.001,
+          3.67138,
+          4.67663
+        ]
+      },
+      {
+        "attempts": 20,
+        "dense": false,
+        "statusBytes": 406,
+        "peopleBytes": 800,
+        "historyBytes": 4402,
+        "statusUs": [
+          3.70738,
+          3.61382,
+          4.11409,
+          3.81199,
+          3.62557
+        ]
+      },
+      {
+        "attempts": 20,
+        "dense": true,
+        "statusBytes": 3587,
+        "peopleBytes": 800,
+        "historyBytes": 38202,
+        "statusUs": [
+          14.246,
+          14.1439,
+          14.5146,
+          14.0917,
+          14.5958
+        ]
+      }
+    ]
+  },
+  "measuredAt": "2026-10-29",
+  "baselineCommit": "9e4434c66f8eaa7c138803b3320551efd3c127bc",
+  "optimizedFirmware": "3.1.0"
+}
