@@ -20,7 +20,6 @@ void resetProgram(bool erase=true) {
   readerVersion = 0;
   lastProbeMs = lastPollMs = lastDetectionErrorMs = 0;
   lastCardUid="";lastCardSeenMs=0;
-  lastRadioRecoveryMs=0;
   operationState=OperationState::IDLE;attemptOpen=false;suppressAttendance=false;
   historyRevision=stateRevision=0;bootId="";
   FakeHTTP::reset();
@@ -41,6 +40,11 @@ void configure(const std::string& name, int value) {
   else if(name=="crypto")Fake::crypto=value;
   else if(name=="tagState")Fake::tag=static_cast<Fake::Tag>(value);
   else if(name=="wakeupTimeout")Fake::wakeupTimeout=value;
+  else if(name=="detectCollision")Fake::detectCollision=value;
+  else if(name=="selectCollision")Fake::selectCollision=value;
+  else if(name=="detectNoRoom")Fake::detectNoRoom=value;
+  else if(name=="selectNoRoom")Fake::selectNoRoom=value;
+  else if(name=="readNoRoom")Fake::readNoRoom=value;
   else if(name=="uidSize") Fake::uidSize=static_cast<byte>(value);
   else if(name=="oversizedRead") Fake::oversizedRead=value;
   else if (name == "authFail") Fake::authFail = value;

@@ -15,7 +15,7 @@ constexpr byte PIN_MISO = 19;
 constexpr byte PIN_MOSI = 23;
 constexpr byte DATA_BLOCK = 4;
 constexpr char WIFI_PASSWORD[] = "cambiar-esta-clave";
-constexpr char FIRMWARE_VERSION[] = "3.2.1";
+constexpr char FIRMWARE_VERSION[] = "3.2.2";
 constexpr uint32_t POLL_MS = 100;
 
 MFRC522 rfid(PIN_SS, PIN_RST);
@@ -82,7 +82,6 @@ uint32_t armedAtMs=0;
 constexpr uint32_t WRITE_TIMEOUT_MS=60000, DIAGNOSTIC_TIMEOUT_MS=30000;
 String lastCardUid;
 uint32_t lastCardSeenMs=0;
-uint32_t lastRadioRecoveryMs=0;
 void writeSelectedCard();
 
 // JSON strings are escaped without requiring an extra JSON library.
@@ -164,7 +163,6 @@ void recoverCardSession() {
   delay(10);
   rfid.PCD_AntennaOn();
   delay(10);
-  lastRadioRecoveryMs=millis();
 }
 
 bool checkReader(bool first) {
@@ -196,35 +194,32 @@ Selection selectCard() {
   rfid.PCD_AntennaOn();
   byte atqa[2] = {};
   byte atqaSize = sizeof(atqa);
-  // WUPA handles both newly arrived and already halted cards.
-  auto status = rfid.PICC_WakeupA(atqa, &atqaSize);
+  // Standard discovery first; WUPA is only needed for an already halted card.
+  auto status = rfid.PICC_RequestA(atqa, &atqaSize);
   if (status == MFRC522::STATUS_TIMEOUT) {
     atqaSize = sizeof(atqa);
-    status = rfid.PICC_RequestA(atqa, &atqaSize);
+    status = rfid.PICC_WakeupA(atqa, &atqaSize);
   }
-  if (status == MFRC522::STATUS_TIMEOUT) {
-    // READY/ACTIVE cards may ignore both short commands after an interrupted
-    // exchange. A bounded RF reset allows the NEXT poll to select them again.
-    // Never reinitialize SPI or recurse into HTTP; no card writes occur here.
-    if(millis()-lastRadioRecoveryMs>=2000)recoverCardSession();
-    return Selection::ABSENT;
-  }
-  if (status != MFRC522::STATUS_OK) {
-    const String detail="Respuesta de radio inválida; presentar una sola tarjeta. "+String(rfid.GetStatusCodeName(status));
-    if (lastDetectionErrorMs == 0 || millis() - lastDetectionErrorMs >= 2000) {
+  if (status == MFRC522::STATUS_TIMEOUT) return Selection::ABSENT;
+  // PICC_IsNewCardPresent also accepts a collision: SELECT implements the
+  // library's anticollision protocol and validates the resulting UID/SAK.
+  if (status != MFRC522::STATUS_OK && status != MFRC522::STATUS_COLLISION) {
+    const byte fifo=rfid.PCD_ReadRegister(MFRC522::FIFOLevelReg);
+    const String detail="DETECCION ATQA (buffer 2 bytes), FIFO="+String(fifo)+": "+String(rfid.GetStatusCodeName(status));
+    if (stage!="ERROR_DETECCION" || message!=detail || lastDetectionErrorMs == 0 || millis() - lastDetectionErrorMs >= 2000) {
       report("ERROR_DETECCION",detail);
       lastDetectionErrorMs = millis();
-    } else {stage="ERROR_DETECCION";message=detail;}
+    }
     recoverCardSession();
     return Selection::ERROR;
   }
   status = rfid.PICC_Select(&rfid.uid);
   if (status != MFRC522::STATUS_OK) {
-    const String detail="Tarjeta detectada, pero no seleccionada: "+String(rfid.GetStatusCodeName(status));
-    if (lastDetectionErrorMs == 0 || millis() - lastDetectionErrorMs >= 2000) {
+    const String detail="SELECT/anticolision: "+String(rfid.GetStatusCodeName(status));
+    if (stage!="ERROR_SELECCION" || message!=detail || lastDetectionErrorMs == 0 || millis() - lastDetectionErrorMs >= 2000) {
       report("ERROR_SELECCION",detail);
       lastDetectionErrorMs = millis();
-    } else {stage="ERROR_SELECCION";message=detail;}
+    }
     recoverCardSession();
     return Selection::ERROR;
   }
@@ -264,7 +259,7 @@ bool readBlock(byte* data) {
   byte size = sizeof(buffer);
   const auto status = rfid.MIFARE_Read(DATA_BLOCK, buffer, &size);
   if (status != MFRC522::STATUS_OK) {
-    report("ERROR_LECTURA", "Fallo al leer el bloque 4: " + String(rfid.GetStatusCodeName(status)));
+    report("ERROR_LECTURA", "READ bloque 4 (buffer 18 bytes): " + String(rfid.GetStatusCodeName(status)));
     return false;
   }
   if(size>sizeof(buffer)){
@@ -404,7 +399,6 @@ bool readSelectedCard() {
 void diagnoseCard() {
  if(operationBusy()){reply(409,"Hay una operación pendiente.");return;}
  if(!checkReader(true)){reply(503,"El RC522 no responde.");return;}
- recoverCardSession();
  beginAttempt("DIAGNOSTICO");
  suppressAttendance=true;
  setOperation(OperationState::WAIT_DIAGNOSTIC); waitingNotice=false; armedAtMs=millis();
@@ -459,10 +453,14 @@ bool pollManual(bool connected) {
  const Selection selection=selectCard();
  if(selection==Selection::ABSENT){
   if(!waitingNotice&&millis()-armedAtMs>=5000){
-   waitingNotice=true;report("ESPERANDO_TARJETA","RC522 conectado; aún no detecta una tarjeta de 13,56 MHz.");
+   waitingNotice=true;
+   if(stage=="ESPERANDO_TARJETA")report("ESPERANDO_TARJETA","RC522 conectado; no se recibió una respuesta ATQA de tarjeta.");
   }
   return true;
  }
+ // Detection/selection errors precede any write. Keep the original operation
+ // armed, its deadline and its error trace; do not require another button click.
+ if(selection==Selection::ERROR)return true;
  if(selection==Selection::SELECTED){
   lastCardUid=hexBytes(rfid.uid.uidByte,rfid.uid.size);lastCardSeenMs=millis();
   if(isWritePending()){setOperation(OperationState::WRITING);writeSelectedCard();setOperation(OperationState::IDLE);}
@@ -875,7 +873,6 @@ void prepareWrite(){
  if(person<0){reply(400,"Solo se admiten las ocho personas fijas.");return;}
  if(server.arg("confirm")!="yes"){reply(400,"Falta confirmar la sobrescritura.");return;}
  if(!checkReader(true)){reply(503,"El RC522 no responde.");return;}
- recoverCardSession();
  beginAttempt("ESCRITURA");
  suppressAttendance=true;
  requestedId=PEOPLE[person].card;

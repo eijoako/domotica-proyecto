@@ -36,20 +36,22 @@ NODE_PATH=/tmp/rfid-browser-tests/node_modules node tests/verify.cjs
 
 Si se utiliza Chromium del sistema, su ruta puede indicarse mediante `CHROMIUM_PATH`. El controlador conserva los ejecutables y las capturas en una carpeta temporal cuya ruta aparece al terminar. No escribe archivos de compilación dentro de las carpetas de los sketches.
 
-## Resultado de la revisión 3.2.1
+## Resultado de la revisión 3.2.2
 
-- 125 comprobaciones de firmware y dos pruebas de navegador con varios escenarios: **127 aprobadas, 0 fallidas**.
+- 154 comprobaciones de firmware y dos pruebas de navegador con varios escenarios: **156 aprobadas, 0 fallidas**.
 - Sin errores detectados por los sanitizadores de memoria y comportamiento indefinido.
-- Sketch unificado compilado para `esp32:esp32:esp32` con Arduino CLI 1.5.1, núcleo ESP32 3.3.8 y MFRC522 1.4.12: 1062141 bytes de programa y 51932 de variables globales. Los paquetes se prepararon en una carpeta temporal de desarrollo; no se agregó PlatformIO ni herramientas al flujo del usuario.
+- Sketch unificado compilado para `esp32:esp32:esp32` con Arduino CLI 1.5.1, núcleo ESP32 3.3.8 y MFRC522 1.4.12: 1062201 bytes de programa y 51932 de variables globales. El sketch opcional de diagnóstico mínimo también compiló: 295364 bytes de programa y 22196 de globales. Los paquetes se prepararon en una carpeta temporal de desarrollo; no se agregó PlatformIO ni herramientas al flujo del usuario.
 - Pendiente: la comprobación con la ESP32, el RC522 y las tarjetas reales.
 
 La batería conserva las regresiones de la revisión anterior y añade los IDs fijos, ambas clases completas, docentes que no reemplazan sesiones, duplicados, estudiantes de otra clase, reloj, cierre, conservación de sesiones y recuperación después de fallos de persistencia. Incluye la cancelación de un diagnóstico con una tarjeta apoyada para comprobar que no termine marcándola presente.
 
 La unificación añade navegación entre `/` y `/admin` sin reinicio, escritura durante una sesión sin registrar la tarjeta administrativa, cancelación con tarjeta apoyada, vencimiento mientras se espera una escritura y conflicto entre dos clientes. Comprueba también una sola inicialización al arrancar, su pausa de estabilización en cada recuperación, UID inválidos y longitudes de bloque excesivas, sin lecturas fuera de límites.
 
-La revisión 3.2.1 añade diecinueve escenarios: restauración de TxMode/RxMode/ModWidth, antena y autenticación residual en los tres usos, recuperación de estados READY/ACTIVE que responden con timeout, alternativa REQA, recuperación al preparar operaciones manuales, cooldown de dos segundos y conservación de presentes durante la recuperación de radio y el reinicio posterior. El caso de timeout exacto utiliza el reloj de pared, incluyendo las pausas del protocolo; no supone que las instrucciones TIME sean la única fuente de tiempo transcurrido.
+La revisión 3.2.2 retira la recuperación periódica por timeout de 3.2.1. Las pruebas de ese comportamiento se reemplazaron por comprobaciones de ausencia de reinicios periódicos, recuperación explícita y preparación de operaciones sin reiniciar el campo. Se mantienen los escenarios de configuración de radio y conservación de presentes. El caso de timeout exacto utiliza el reloj de pared, incluyendo las pausas del protocolo.
 
-Los fallos de radio se inyectan en el adaptador: esas regresiones comprueban la lógica de recuperación, no prueban que reproduzcan la causa física del caso comunicado como «versión 92, sin tarjeta de 13,56 MHz». La confirmación en ese equipo sigue pendiente.
+El adaptador anterior solo representaba OK, ERROR y TIMEOUT; no tenía los estados de colisión y falta de espacio que aparecieron en el equipo. Ahora incluye `STATUS_COLLISION` y `STATUS_NO_ROOM`, y las regresiones distinguen detección, SELECT y READ. Comprueban que una colisión de detección permita seleccionar, una colisión no resuelta impida escribir, los errores previos a la escritura puedan reintentarse sin rearmar, las revisiones cambien al cambiar el error y una escritura de confirmación incierta nunca se repita automáticamente.
+
+Estos fallos se inyectan en un adaptador; no se ejecuta la radio física ni el transporte SPI de MFRC522. No demuestran que la causa del fallo comunicado se haya identificado o corregido en ese equipo. La prueba mínima de solo lectura permite obtener esa evidencia sin la web ni LittleFS, pero aquí solo se comprobó su compilación.
 
 ## Mediciones
 

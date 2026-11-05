@@ -111,7 +111,7 @@ async function nativeTests(writer,reader) {
   ]) await check('handle '+fault,async()=>{
     await writer.reset();await writer.config(fault,true);await writer.card(true);
     await writer.arm();const r=await writer.tick();expectStage(r,stage);
-    assert.equal(r.writes,writes);assert.equal(r.status.pending,false);
+    assert.equal(r.writes,writes);assert.equal(r.status.pending,['selectFail','detectFail'].includes(fault));
   });
   await check('short read is not described as success',async()=>{
     await writer.reset();await writer.config('shortRead',true);await writer.card(true);await writer.arm();
@@ -121,7 +121,7 @@ async function nativeTests(writer,reader) {
   await check('retry selection failure without removing card',async()=>{
     await writer.reset();await writer.card(true);await writer.config('selectFail',true);await writer.arm();
     expectStage(await writer.tick(),'ERROR_SELECCION');
-    await writer.config('selectFail',false);await writer.arm();
+    await writer.config('selectFail',false);
     expectStage(await writer.tick(),'ESCRITURA_OK');
   });
   await check('invalid prepare preserves the last successful result',async()=>{
@@ -349,12 +349,14 @@ async function detectionRecoveryTests(reader){
    const r=await reader.tick();expectStage(r,mode==='write'?'ESCRITURA_OK':'LECTURA_OK');
    assert.equal(r.writes,mode==='write'?1:0);
   });
-  for(const state of [1,2])await check('recover silent READY/ACTIVE card '+state+' in '+mode,async()=>{
+  for(const state of [1,2])await check('explicit reset recovers READY/ACTIVE card '+state+' in '+mode,async()=>{
    await reader.reset();await reader.card(true,cardBlock(CARDS.ALU_01));
    if(mode==='write')await reader.arm();else if(mode==='diagnostic')await reader.post('/api/diagnose');
    const before=await reader.get();await reader.config('tagState',state);
-   let r=await reader.tick(2001);assert(r.fieldResets>before.fieldResets);assert.equal(r.reads,0);assert.equal(r.writes,0);
-   assert.equal(r.initializations,1,'Recovery must not reset SPI/chip or attendance');
+   let r=await reader.tick(2001);assert.equal(r.fieldResets,before.fieldResets);assert.equal(r.reads,0);assert.equal(r.writes,0);
+   if(mode!=='attendance')await reader.post('/api/cancel');
+   await reader.post('/api/reader/reset');
+   if(mode==='write')await reader.arm();else if(mode==='diagnostic')await reader.post('/api/diagnose');
    r=await reader.tick();expectStage(r,mode==='write'?'ESCRITURA_OK':'LECTURA_OK');
   });
  }
@@ -362,22 +364,81 @@ async function detectionRecoveryTests(reader){
   await reader.reset();await reader.card(true,cardBlock(CARDS.ALU_01));await reader.config('wakeupTimeout',true);
   expectStage(await reader.tick(),'LECTURA_OK');
  });
- await check('empty field recovery has a two-second cooldown and never writes',async()=>{
+ await check('empty field never triggers periodic radio resets or writes',async()=>{
   await reader.reset();await reader.arm();let r=await reader.tick(2001);const count=r.fieldResets;
   for(let i=0;i<10;++i){r=await reader.tick();assert.equal(r.fieldResets,count);}
-  r=await reader.tick(1000);assert.equal(r.fieldResets,count+1);assert.equal(r.writes,0);assert(r.status.pending);
+  r=await reader.tick(10000);assert.equal(r.fieldResets,count);assert.equal(r.writes,0);assert(r.status.pending);
  });
- await check('manual operations reset an interrupted selection before polling',async()=>{
-  await reader.reset();await reader.card(true,cardBlock(CARDS.ALU_01));await reader.config('tagState',2);
+ await check('preparing a manual operation does not reset the RF field',async()=>{
+  await reader.reset();await reader.card(true,cardBlock(CARDS.ALU_01));
   await reader.arm();expectStage(await reader.tick(),'ESCRITURA_OK');
-  await reader.config('tagState',1);await reader.post('/api/diagnose');expectStage(await reader.tick(),'LECTURA_OK');
+  await reader.post('/api/diagnose');let r=await reader.tick();expectStage(r,'LECTURA_OK');assert.equal(r.fieldResets,0);
  });
- await check('RF recovery preserves active session and its persisted students',async()=>{
+ await check('explicit reader reset preserves active session and persisted students',async()=>{
   await openClass(reader);await scan(reader,'ALU_01');await reader.config('tagState',2);
-  await reader.tick(2001);let r=await reader.tick();assert(r.status.attendance.active);
+  await reader.tick(2001);await reader.post('/api/reader/reset');let r=await reader.tick();assert(r.status.attendance.active);
   assert.equal(r.status.attendance.session.presentStudents.length,1);
   r=await reader.command('REBOOT');assert.equal(r.status.attendance.session.presentStudents.length,1);
  });
+}
+
+async function collisionAndBufferTests(reader){
+ for(const mode of ['write','diagnostic'])for(const fault of ['detectNoRoom','selectNoRoom','detectFail','selectFail','selectCollision'])
+  await check('retry pre-write error '+fault+' without rearming '+mode,async()=>{
+   await reader.reset();await reader.card(true,cardBlock(CARDS.ALU_01));
+   if(mode==='write')await reader.arm();else await reader.post('/api/diagnose');
+   await reader.config(fault,true);let r=await reader.tick();assert.equal(r.writes,0);
+   assert(mode==='write'?r.status.pending:r.status.diagnosticPending);
+   await reader.config(fault,false);r=await reader.tick();expectStage(r,mode==='write'?'ESCRITURA_OK':'LECTURA_OK');
+   assert.equal(r.writes,mode==='write'?1:0);assert.equal((await reader.history()).attempts.length,1);
+   assert(r.status.trace.includes('ERROR_'),'Retry discarded earlier error');
+  });
+ await check('generic waiting notice cannot replace a detection error',async()=>{
+  await reader.reset();await reader.arm();await reader.config('detectNoRoom',true);await reader.tick();
+  await reader.config('detectNoRoom',false);const r=await reader.tick(5000);
+  expectStage(r,'ERROR_DETECCION');assert(r.status.message.includes('FIFO=3'));assert(r.status.pending);
+  assert.equal((await reader.post('/api/cancel')).code,200);assert.equal((await reader.tick()).writes,0);
+ });
+ await check('pre-write retries preserve the original deadline',async()=>{
+  await reader.reset();await reader.arm();await reader.card(true);await reader.config('selectFail',true);await reader.tick();
+  await reader.config('selectFail',false);const r=await reader.tick(60000);expectStage(r,'TIEMPO_AGOTADO');assert.equal(r.writes,0);
+ });
+ await check('changing errors updates the browser revision immediately',async()=>{
+  await reader.reset();await reader.card(true);await reader.arm();await reader.config('detectNoRoom',true);
+  const first=await reader.tick();await reader.config('detectNoRoom',false);await reader.config('selectCollision',true);
+  const next=await reader.tick();expectStage(next,'ERROR_SELECCION');assert(next.status.stateRevision>first.status.stateRevision);
+  assert(next.status.trace.includes('A buffer is not big enough.'));assert(next.status.trace.includes('Collision detected.'));
+ });
+ await check('unconfirmed transmitted write is never automatically repeated',async()=>{
+  await reader.reset();await reader.card(true);await reader.arm();await reader.config('lostAck',true);
+  let r=await reader.tick();expectStage(r,'ERROR_ESCRITURA');assert.equal(r.writes,1);assert(!r.status.pending);
+  await reader.config('lostAck',false);r=await reader.tick(10000);assert.equal(r.writes,1);
+ });
+ for(const mode of ['attendance','diagnostic','write']){
+  async function prepare(){
+   await reader.reset();await reader.card(true,cardBlock(CARDS.ALU_01));
+   if(mode==='write')await reader.arm();else if(mode==='diagnostic')await reader.post('/api/diagnose');
+  }
+  await check('discovery collision enters library anticollision in '+mode,async()=>{
+   await prepare();await reader.config('detectCollision',true);
+   const r=await reader.tick();expectStage(r,mode==='write'?'ESCRITURA_OK':'LECTURA_OK');
+   assert.equal(r.fieldResets,0);assert.equal(r.writes,mode==='write'?1:0);
+  });
+  await check('unresolved SELECT collision never reaches writing in '+mode,async()=>{
+   await prepare();await reader.config('selectCollision',true);
+   const r=await reader.tick();expectStage(r,'ERROR_SELECCION');assert.equal(r.writes,0);
+   assert(r.status.message.includes('SELECT/anticolision'));assert(r.status.message.includes('Collision detected.'));
+  });
+  for(const [fault,stage,detail] of [
+   ['detectNoRoom','ERROR_DETECCION','ATQA (buffer 2 bytes), FIFO=3'],
+   ['selectNoRoom','ERROR_SELECCION','SELECT/anticolision'],
+   ['readNoRoom','ERROR_LECTURA','READ bloque 4 (buffer 18 bytes)']
+  ])await check('real STATUS_NO_ROOM distinguished at '+fault+' in '+mode,async()=>{
+   await prepare();await reader.config(fault,true);const r=await reader.tick();expectStage(r,stage);
+   assert.equal(r.writes,0);assert(r.status.message.includes(detail));
+   assert(r.status.message.includes('A buffer is not big enough.'));
+  });
+ }
 }
 
 async function unifiedTests(reader){
@@ -724,6 +785,7 @@ async function browserOptimizationTests(writer) {
   await newFeatureTests(writer,reader);
   await unifiedTests(reader);
   await detectionRecoveryTests(reader);
+  await collisionAndBufferTests(reader);
   await optimizationTests(writer,reader);
   if(!process.argv.includes('--native-only')&&!failures.length)
     await check('real browser end-to-end',()=>browserTests(writer,reader));

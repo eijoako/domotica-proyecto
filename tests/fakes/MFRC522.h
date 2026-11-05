@@ -21,6 +21,7 @@ inline unsigned earlyProbes = 0;
 inline byte txMode=0,rxMode=0,modWidth=0x26;
 inline bool antennaOn=true,wakeupTimeout=false;
 inline unsigned fieldResets=0;
+inline bool detectCollision=false,selectCollision=false,detectNoRoom=false,selectNoRoom=false,readNoRoom=false;
 inline byte uid[4] = {1, 2, 3, 4};
 inline int writes = 0, attempts = 0, reads = 0, initializations = 0;
 inline std::array<std::array<byte, 16>, 64> memory;
@@ -31,6 +32,7 @@ inline void reset() {
   crypto = false; safe = true; version = 0x92;
   uidSize=4;oversizedRead=false;initializedAt=0;earlyProbes=0;
   txMode=rxMode=0;modWidth=0x26;antennaOn=true;wakeupTimeout=false;fieldResets=0;
+  detectCollision=selectCollision=detectNoRoom=selectNoRoom=readNoRoom=false;
   writes = attempts = reads = initializations = 0;
   for (auto& block : memory) block.fill(0xA5);
   memory[4].fill(0);
@@ -42,9 +44,9 @@ inline void presentCard(bool on) {
 }
 class MFRC522 {
  public:
-  enum StatusCode { STATUS_OK, STATUS_ERROR, STATUS_TIMEOUT };
+  enum StatusCode { STATUS_OK, STATUS_ERROR, STATUS_TIMEOUT, STATUS_COLLISION, STATUS_NO_ROOM };
   enum PICC_Type { PICC_TYPE_MIFARE_1K, PICC_TYPE_OTHER };
-  enum PCD_Register { VersionReg, TxModeReg, RxModeReg, ModWidthReg };
+  enum PCD_Register { VersionReg, TxModeReg, RxModeReg, ModWidthReg, FIFOLevelReg };
   static constexpr byte PICC_CMD_MF_AUTH_KEY_A = 0x60;
   struct MIFARE_Key { byte keyByte[6]; };
   struct Uid { byte size = 4; byte uidByte[10] = {}; byte sak = 0x08; } uid;
@@ -63,26 +65,33 @@ class MFRC522 {
     else if(reg==ModWidthReg)Fake::modWidth=value;
   }
   bool radioReady(){return Fake::antennaOn&&!Fake::crypto&&Fake::txMode==0&&Fake::rxMode==0&&Fake::modWidth==0x26;}
-  byte PCD_ReadRegister(PCD_Register) {
+  byte PCD_ReadRegister(PCD_Register reg) {
+    if(reg==FIFOLevelReg)return Fake::detectNoRoom?3:0;
     if(millis()-Fake::initializedAt<50)++Fake::earlyProbes;
     return Fake::version;
   }
   StatusCode PICC_RequestA(byte*, byte*) {
     if(!radioReady())return STATUS_TIMEOUT;
     if (Fake::detectFail) return STATUS_ERROR;
+    if(Fake::detectNoRoom)return STATUS_NO_ROOM;
     if (!Fake::present || Fake::tag != Fake::Tag::IDLE) return STATUS_TIMEOUT;
     Fake::tag = Fake::Tag::READY;
+    if(Fake::detectCollision)return STATUS_COLLISION;
     return STATUS_OK;
   }
   StatusCode PICC_WakeupA(byte*, byte*) {
     if(Fake::detectFail)return STATUS_ERROR;
+    if(Fake::detectNoRoom)return STATUS_NO_ROOM;
     if(Fake::wakeupTimeout||!radioReady())return STATUS_TIMEOUT;
     if (!Fake::present || (Fake::tag != Fake::Tag::IDLE && Fake::tag != Fake::Tag::HALTED))
       return STATUS_TIMEOUT;
     Fake::tag = Fake::Tag::READY;
+    if(Fake::detectCollision)return STATUS_COLLISION;
     return STATUS_OK;
   }
   StatusCode PICC_Select(Uid* target) {
+    if(Fake::selectCollision)return STATUS_COLLISION;
+    if(Fake::selectNoRoom)return STATUS_NO_ROOM;
     if (Fake::selectFail || Fake::tag != Fake::Tag::READY) return STATUS_ERROR;
     Fake::tag = Fake::Tag::ACTIVE;
     target->size=Fake::uidSize;
@@ -94,7 +103,7 @@ class MFRC522 {
     return type == PICC_TYPE_MIFARE_1K ? "MIFARE Classic 1K" : "Other";
   }
   static const char* GetStatusCodeName(StatusCode status) {
-    return status == STATUS_OK ? "Success" : status == STATUS_TIMEOUT ? "Timeout" : "Simulated failure";
+    return status == STATUS_OK ? "Success" : status == STATUS_TIMEOUT ? "Timeout" : status == STATUS_COLLISION ? "Collision detected." : status == STATUS_NO_ROOM ? "A buffer is not big enough." : "Simulated failure";
   }
   StatusCode PCD_Authenticate(byte command, byte block, MIFARE_Key* key, Uid*) {
     bool correctKey = true;
@@ -105,6 +114,7 @@ class MFRC522 {
     return STATUS_OK;
   }
   StatusCode MIFARE_Read(byte block, byte* data, byte* size) {
+    if(Fake::readNoRoom)return STATUS_NO_ROOM;
     if (block != 4 || !Fake::present || Fake::tag != Fake::Tag::ACTIVE ||
         !Fake::crypto || *size < 18 || Fake::readFail ||
         (Fake::verifyFail && Fake::writes > 0)) return STATUS_ERROR;
