@@ -36,16 +36,20 @@ NODE_PATH=/tmp/rfid-browser-tests/node_modules node tests/verify.cjs
 
 Si se utiliza Chromium del sistema, su ruta puede indicarse mediante `CHROMIUM_PATH`. El controlador conserva los ejecutables y las capturas en una carpeta temporal cuya ruta aparece al terminar. No escribe archivos de compilación dentro de las carpetas de los sketches.
 
-## Resultado de la revisión 3.2.0
+## Resultado de la revisión 3.2.1
 
-- 106 comprobaciones de firmware y dos pruebas de navegador con varios escenarios: **108 aprobadas, 0 fallidas**.
+- 125 comprobaciones de firmware y dos pruebas de navegador con varios escenarios: **127 aprobadas, 0 fallidas**.
 - Sin errores detectados por los sanitizadores de memoria y comportamiento indefinido.
-- Sketch unificado compilado para `esp32:esp32:esp32` con Arduino CLI 1.5.1, núcleo ESP32 3.3.8 y MFRC522 1.4.12: 1062049 bytes de programa y 51932 de variables globales. Los paquetes se prepararon en una carpeta temporal de desarrollo; no se agregó PlatformIO ni herramientas al flujo del usuario.
+- Sketch unificado compilado para `esp32:esp32:esp32` con Arduino CLI 1.5.1, núcleo ESP32 3.3.8 y MFRC522 1.4.12: 1062141 bytes de programa y 51932 de variables globales. Los paquetes se prepararon en una carpeta temporal de desarrollo; no se agregó PlatformIO ni herramientas al flujo del usuario.
 - Pendiente: la comprobación con la ESP32, el RC522 y las tarjetas reales.
 
 La batería conserva las regresiones de la revisión anterior y añade los IDs fijos, ambas clases completas, docentes que no reemplazan sesiones, duplicados, estudiantes de otra clase, reloj, cierre, conservación de sesiones y recuperación después de fallos de persistencia. Incluye la cancelación de un diagnóstico con una tarjeta apoyada para comprobar que no termine marcándola presente.
 
 La unificación añade navegación entre `/` y `/admin` sin reinicio, escritura durante una sesión sin registrar la tarjeta administrativa, cancelación con tarjeta apoyada, vencimiento mientras se espera una escritura y conflicto entre dos clientes. Comprueba también una sola inicialización al arrancar, su pausa de estabilización en cada recuperación, UID inválidos y longitudes de bloque excesivas, sin lecturas fuera de límites.
+
+La revisión 3.2.1 añade diecinueve escenarios: restauración de TxMode/RxMode/ModWidth, antena y autenticación residual en los tres usos, recuperación de estados READY/ACTIVE que responden con timeout, alternativa REQA, recuperación al preparar operaciones manuales, cooldown de dos segundos y conservación de presentes durante la recuperación de radio y el reinicio posterior. El caso de timeout exacto utiliza el reloj de pared, incluyendo las pausas del protocolo; no supone que las instrucciones TIME sean la única fuente de tiempo transcurrido.
+
+Los fallos de radio se inyectan en el adaptador: esas regresiones comprueban la lógica de recuperación, no prueban que reproduzcan la causa física del caso comunicado como «versión 92, sin tarjeta de 13,56 MHz». La confirmación en ese equipo sigue pendiente.
 
 ## Mediciones
 

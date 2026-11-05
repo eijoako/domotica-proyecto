@@ -18,6 +18,9 @@ inline byte uidSize = 4;
 inline bool oversizedRead = false;
 inline uint32_t initializedAt = 0;
 inline unsigned earlyProbes = 0;
+inline byte txMode=0,rxMode=0,modWidth=0x26;
+inline bool antennaOn=true,wakeupTimeout=false;
+inline unsigned fieldResets=0;
 inline byte uid[4] = {1, 2, 3, 4};
 inline int writes = 0, attempts = 0, reads = 0, initializations = 0;
 inline std::array<std::array<byte, 16>, 64> memory;
@@ -27,6 +30,7 @@ inline void reset() {
   corrupt = selectFail = detectFail = shortRead = removeOnWrite = lostAck = false;
   crypto = false; safe = true; version = 0x92;
   uidSize=4;oversizedRead=false;initializedAt=0;earlyProbes=0;
+  txMode=rxMode=0;modWidth=0x26;antennaOn=true;wakeupTimeout=false;fieldResets=0;
   writes = attempts = reads = initializations = 0;
   for (auto& block : memory) block.fill(0xA5);
   memory[4].fill(0);
@@ -40,7 +44,7 @@ class MFRC522 {
  public:
   enum StatusCode { STATUS_OK, STATUS_ERROR, STATUS_TIMEOUT };
   enum PICC_Type { PICC_TYPE_MIFARE_1K, PICC_TYPE_OTHER };
-  enum PCD_Register { VersionReg };
+  enum PCD_Register { VersionReg, TxModeReg, RxModeReg, ModWidthReg };
   static constexpr byte PICC_CMD_MF_AUTH_KEY_A = 0x60;
   struct MIFARE_Key { byte keyByte[6]; };
   struct Uid { byte size = 4; byte uidByte[10] = {}; byte sak = 0x08; } uid;
@@ -51,19 +55,28 @@ class MFRC522 {
     Fake::crypto = false;
     Fake::tag = Fake::Tag::IDLE;
   }
-  void PCD_AntennaOff() { Fake::crypto = false; Fake::tag = Fake::Tag::IDLE; }
-  void PCD_AntennaOn() {}
+  void PCD_AntennaOff() { ++Fake::fieldResets;Fake::antennaOn=false;Fake::crypto = false; Fake::tag = Fake::Tag::IDLE; }
+  void PCD_AntennaOn() {Fake::antennaOn=true;}
+  void PCD_WriteRegister(PCD_Register reg,byte value){
+    if(reg==TxModeReg)Fake::txMode=value;
+    else if(reg==RxModeReg)Fake::rxMode=value;
+    else if(reg==ModWidthReg)Fake::modWidth=value;
+  }
+  bool radioReady(){return Fake::antennaOn&&!Fake::crypto&&Fake::txMode==0&&Fake::rxMode==0&&Fake::modWidth==0x26;}
   byte PCD_ReadRegister(PCD_Register) {
     if(millis()-Fake::initializedAt<50)++Fake::earlyProbes;
     return Fake::version;
   }
   StatusCode PICC_RequestA(byte*, byte*) {
+    if(!radioReady())return STATUS_TIMEOUT;
     if (Fake::detectFail) return STATUS_ERROR;
     if (!Fake::present || Fake::tag != Fake::Tag::IDLE) return STATUS_TIMEOUT;
     Fake::tag = Fake::Tag::READY;
     return STATUS_OK;
   }
   StatusCode PICC_WakeupA(byte*, byte*) {
+    if(Fake::detectFail)return STATUS_ERROR;
+    if(Fake::wakeupTimeout||!radioReady())return STATUS_TIMEOUT;
     if (!Fake::present || (Fake::tag != Fake::Tag::IDLE && Fake::tag != Fake::Tag::HALTED))
       return STATUS_TIMEOUT;
     Fake::tag = Fake::Tag::READY;

@@ -20,6 +20,7 @@ void resetProgram(bool erase=true) {
   readerVersion = 0;
   lastProbeMs = lastPollMs = lastDetectionErrorMs = 0;
   lastCardUid="";lastCardSeenMs=0;
+  lastRadioRecoveryMs=0;
   operationState=OperationState::IDLE;attemptOpen=false;suppressAttendance=false;
   historyRevision=stateRevision=0;bootId="";
   FakeHTTP::reset();
@@ -35,6 +36,11 @@ void resetProgram(bool erase=true) {
 
 void configure(const std::string& name, int value) {
   if (name == "version") Fake::version = static_cast<byte>(value);
+  else if(name=="radioDirty") {Fake::txMode=value?0x80:0;Fake::rxMode=value?0x80:0;Fake::modWidth=value?0:0x26;}
+  else if(name=="antennaOff")Fake::antennaOn=!value;
+  else if(name=="crypto")Fake::crypto=value;
+  else if(name=="tagState")Fake::tag=static_cast<Fake::Tag>(value);
+  else if(name=="wakeupTimeout")Fake::wakeupTimeout=value;
   else if(name=="uidSize") Fake::uidSize=static_cast<byte>(value);
   else if(name=="oversizedRead") Fake::oversizedRead=value;
   else if (name == "authFail") Fake::authFail = value;
@@ -152,6 +158,7 @@ int main() {
               << ",\"reads\":" << Fake::reads
               << ",\"initializations\":" << Fake::initializations
               << ",\"earlyProbes\":" << Fake::earlyProbes
+              << ",\"fieldResets\":" << Fake::fieldResets
               << ",\"formats\":" << FakeFS::formats
               << ",\"historyUnchanged\":" << (!checkHistory||historyBefore==historyFingerprint()?"true":"false")
               << ",\"httpReentered\":" << (FakeHTTP::reentered?"true":"false")

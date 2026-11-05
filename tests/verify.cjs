@@ -141,9 +141,12 @@ async function nativeTests(writer,reader) {
     const r=await writer.post('/api/cancel');assert.equal(r.code,409);expectStage(r,'ESCRITURA_OK');
   });
   await check('no card, waiting notice, and exact timeout',async()=>{
-    await writer.reset();await writer.arm();let r=await writer.tick(5000);
+    await writer.reset();const armed=await writer.arm();let r=await writer.tick(5000);
     expectStage(r,'ESPERANDO_TARJETA');assert.equal(r.status.remainingSeconds,55);
-    r=await writer.tick(54999);assert.equal(r.status.pending,true);
+    // Recovery has real protocol delays. Check the wall-clock deadline rather
+    // than assuming TIME commands are the only source of elapsed time.
+    await writer.command('CLOCK '+(armed.nowMs+59999));r=await writer.get();
+    assert.equal(r.status.pending,true);assert.equal(r.status.remainingSeconds,1);
     r=await writer.tick(1);expectStage(r,'TIEMPO_AGOTADO');assert.equal(r.attempts,0);
   });
   await check('no late write when card arrives at timeout',async()=>{
@@ -336,6 +339,46 @@ async function newFeatureTests(writer,reader){
  });
 }
 
+
+async function detectionRecoveryTests(reader){
+ for(const mode of ['attendance','diagnostic','write']){
+  for(const fault of ['radioDirty','antennaOff','crypto'])await check('restore radio '+fault+' in '+mode,async()=>{
+   await reader.reset();await reader.card(true,cardBlock(CARDS.ALU_01));
+   if(mode==='write')await reader.arm();else if(mode==='diagnostic')await reader.post('/api/diagnose');
+   await reader.config(fault,true);
+   const r=await reader.tick();expectStage(r,mode==='write'?'ESCRITURA_OK':'LECTURA_OK');
+   assert.equal(r.writes,mode==='write'?1:0);
+  });
+  for(const state of [1,2])await check('recover silent READY/ACTIVE card '+state+' in '+mode,async()=>{
+   await reader.reset();await reader.card(true,cardBlock(CARDS.ALU_01));
+   if(mode==='write')await reader.arm();else if(mode==='diagnostic')await reader.post('/api/diagnose');
+   const before=await reader.get();await reader.config('tagState',state);
+   let r=await reader.tick(2001);assert(r.fieldResets>before.fieldResets);assert.equal(r.reads,0);assert.equal(r.writes,0);
+   assert.equal(r.initializations,1,'Recovery must not reset SPI/chip or attendance');
+   r=await reader.tick();expectStage(r,mode==='write'?'ESCRITURA_OK':'LECTURA_OK');
+  });
+ }
+ await check('fallback REQA remains available when WUPA times out',async()=>{
+  await reader.reset();await reader.card(true,cardBlock(CARDS.ALU_01));await reader.config('wakeupTimeout',true);
+  expectStage(await reader.tick(),'LECTURA_OK');
+ });
+ await check('empty field recovery has a two-second cooldown and never writes',async()=>{
+  await reader.reset();await reader.arm();let r=await reader.tick(2001);const count=r.fieldResets;
+  for(let i=0;i<10;++i){r=await reader.tick();assert.equal(r.fieldResets,count);}
+  r=await reader.tick(1000);assert.equal(r.fieldResets,count+1);assert.equal(r.writes,0);assert(r.status.pending);
+ });
+ await check('manual operations reset an interrupted selection before polling',async()=>{
+  await reader.reset();await reader.card(true,cardBlock(CARDS.ALU_01));await reader.config('tagState',2);
+  await reader.arm();expectStage(await reader.tick(),'ESCRITURA_OK');
+  await reader.config('tagState',1);await reader.post('/api/diagnose');expectStage(await reader.tick(),'LECTURA_OK');
+ });
+ await check('RF recovery preserves active session and its persisted students',async()=>{
+  await openClass(reader);await scan(reader,'ALU_01');await reader.config('tagState',2);
+  await reader.tick(2001);let r=await reader.tick();assert(r.status.attendance.active);
+  assert.equal(r.status.attendance.session.presentStudents.length,1);
+  r=await reader.command('REBOOT');assert.equal(r.status.attendance.session.presentStudents.length,1);
+ });
+}
 
 async function unifiedTests(reader){
  await check('single firmware serves attendance and both admin paths',async()=>{
@@ -680,6 +723,7 @@ async function browserOptimizationTests(writer) {
   await nativeTests(writer,reader);
   await newFeatureTests(writer,reader);
   await unifiedTests(reader);
+  await detectionRecoveryTests(reader);
   await optimizationTests(writer,reader);
   if(!process.argv.includes('--native-only')&&!failures.length)
     await check('real browser end-to-end',()=>browserTests(writer,reader));

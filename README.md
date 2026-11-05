@@ -2,7 +2,7 @@
 
 > Proyecto escolar realizado completamente con **inteligencia artificial y prompt engineering**. Su código y documentación se generaron a partir de requisitos para una demostración de aula.
 
-La versión **3.2.0** reúne asistencia, escritura y diagnóstico en un único programa para **Arduino IDE**: [lector/lector.ino](lector/lector.ino).
+La versión **3.2.1** reúne asistencia, escritura y diagnóstico en un único programa para **Arduino IDE**: [lector/lector.ino](lector/lector.ino).
 
 La asistencia está en **http://192.168.4.1/** y la configuración de tarjetas en **http://192.168.4.1/admin**. No es necesario cambiar de firmware para pasar de una función a otra. El antiguo sketch `escritor/escritor.ino` se retiró para mantener una sola implementación.
 
@@ -58,7 +58,7 @@ El RC522 utiliza **3,3 V, nunca 5 V**.
 6. Abrir `lector/lector.ino` y conservar `CooperativeServer.h` junto al `.ino`; no requiere instalación ni generación previa. Solo se carga este programa.
 7. Seleccionar **ESP32 Dev Module**, elegir el puerto USB y pulsar **Subir**.
 8. Si queda en `Connecting…`, mantener pulsado **BOOT** hasta comenzar la carga y después soltarlo.
-9. Abrir el Monitor serie a **115200 baudios** y pulsar **EN/RESET**. Deben aparecer `RFID-ESP32` y `firmware 3.2.0`. Tras actualizar el firmware, debe recargarse también la página del teléfono.
+9. Abrir el Monitor serie a **115200 baudios** y pulsar **EN/RESET**. Deben aparecer `RFID-ESP32` y `firmware 3.2.1`. Tras actualizar el firmware, debe recargarse también la página del teléfono.
 
 Si el chip deja de responder durante la carga, se recomienda cerrar el Monitor serie, comprobar el cable de datos, reducir `Upload Speed` a 115200 y probar la carga con el RC522 desconectado. El lector se vuelve a conectar con la placa apagada.
 
@@ -116,6 +116,10 @@ Ambas páginas muestran por separado la respuesta de la ESP32, el estado del RC5
 
 La espera de escritura es de 60 segundos. El diagnóstico del Monitor serie contiene los mismos pasos que la web.
 
+Desde la versión 3.2.1, cada búsqueda restaura los registros de transmisión, recepción y modulación que prepara `PICC_IsNewCardPresent()` de MFRC522, detiene una autenticación anterior y asegura que la antena esté activa. Se intenta WUPA para tarjetas nuevas o detenidas, con REQA como alternativa. Antes de preparar una escritura o diagnóstico se recupera la sesión de radio.
+
+Si ambas consultas agotan el tiempo, el campo de radio se apaga y se enciende brevemente, con pausas de 10 ms y una separación mínima de dos segundos entre esas recuperaciones por timeout. Esto permite recuperar tarjetas que quedaron en READY/ACTIVE tras una operación interrumpida, sin reiniciar la ESP32 ni modificar asistencias. Un registro de versión `92` confirma respuesta del chip, pero no demuestra que la tarjeta esté respondiendo por radio. La recuperación tampoco garantiza corregir cualquier fallo físico.
+
 | Resultado | Comprobación |
 |---|---|
 | ERROR_LECTOR / registro 00 o FF | Alimentación a 3,3 V y conexiones SPI. |
@@ -134,9 +138,9 @@ Antes de utilizar una tarjeta escrita, se puede retirar y volver a presentar med
 
 Las pruebas automatizadas están en [tests/README.md](tests/README.md). Incluyen simulaciones del firmware, fallos de persistencia y pruebas de la página real en Chromium. **No equivalen a comprobar la radio ni la escritura con una ESP32 y un RC522 físicos.** El uso normal solo requiere Arduino IDE; las herramientas de pruebas son opcionales para desarrollo.
 
-La revisión 3.2.0 pasó **108 comprobaciones automatizadas**, incluidas ambas páginas en Chromium. Las pruebas simulan errores de radio, UID de longitud inválida y lecturas de bloque incompletas o de longitud excesiva, bajo sanitizadores de memoria. La comprobación física de esta versión sigue pendiente en el liceo.
+La revisión 3.2.1 pasó **127 comprobaciones automatizadas**, incluidas ambas páginas en Chromium. Las pruebas simulan errores de radio, UID de longitud inválida y lecturas de bloque incompletas o de longitud excesiva, bajo sanitizadores de memoria. También simulan registros de radio alterados, antena apagada, autenticación residual y tarjetas bloqueadas en READY/ACTIVE para asistencia, diagnóstico y escritura. La comprobación física de esta versión sigue pendiente en el liceo.
 
-El sketch unificado compiló para `esp32:esp32:esp32` con Arduino CLI 1.5.1, núcleo ESP32 3.3.8 y MFRC522 1.4.12: **1062049 bytes de programa** y **51932 bytes de variables globales**. Estas cifras no miden el heap durante el uso ni su fragmentación.
+El sketch unificado compiló para `esp32:esp32:esp32` con Arduino CLI 1.5.1, núcleo ESP32 3.3.8 y MFRC522 1.4.12: **1062141 bytes de programa** y **51932 bytes de variables globales**. Estas cifras no miden el heap durante el uso ni su fragmentación.
 
 El buffer de lectura mantiene 18 bytes para datos y CRC, antes de copiar los 16 bytes de datos. Se rechazan UID que no tengan 4, 7 o 10 bytes y longitudes de respuesta fuera del buffer. La escritura valida el límite de 16 bytes del ID antes de copiarlo. También se corrigió la inicialización duplicada del RC522 y se conserva una pausa de 50 ms después de cada inicialización real. Estos controles no identifican por sí solos el fallo anterior descrito como un error de buffer: sin su mensaje exacto no se afirma haber reproducido su causa.
 
