@@ -6,6 +6,10 @@
 #include <MFRC522.h>
 #include <esp_system.h>
 #include <string.h>
+#include <LittleFS.h>
+#include <time.h>
+#include <stdlib.h>
+#include "WebPage.h"
 
 // ESP32 Dev Module + RC522, powered at 3.3 V.
 constexpr byte PIN_SS = 5;
@@ -15,8 +19,8 @@ constexpr byte PIN_MISO = 19;
 constexpr byte PIN_MOSI = 23;
 constexpr byte DATA_BLOCK = 4;
 constexpr char WIFI_PASSWORD[] = "cambiar-esta-clave";
-constexpr char FIRMWARE_VERSION[] = "3.2.2";
-constexpr uint32_t POLL_MS = 100;
+constexpr char FIRMWARE_VERSION[] = "3.3.0";
+constexpr uint32_t POLL_MS = 250;
 
 MFRC522 rfid(PIN_SS, PIN_RST);
 void tickAttendance();
@@ -62,7 +66,6 @@ String bootId;
 uint32_t stateRevision=0, historyRevision=0;
 bool isWritePending(){return operationState==OperationState::WAIT_WRITE;}
 bool isDiagnosticPending(){return operationState==OperationState::WAIT_DIAGNOSTIC;}
-bool isWriting(){return operationState==OperationState::WRITING;}
 bool operationBusy(){return operationState!=OperationState::IDLE;}
 void setOperation(OperationState state){
  if(operationState!=state){operationState=state;++stateRevision;}
@@ -83,6 +86,7 @@ constexpr uint32_t WRITE_TIMEOUT_MS=60000, DIAGNOSTIC_TIMEOUT_MS=30000;
 String lastCardUid;
 uint32_t lastCardSeenMs=0;
 void writeSelectedCard();
+bool readBlock(byte (&data)[16]);
 
 // JSON strings are escaped without requiring an extra JSON library.
 String jsonString(const String& value) {
@@ -241,11 +245,11 @@ bool authenticate() {
     report("TIPO_NO_COMPATIBLE", "El bloque 4 requiere MIFARE Classic 1K. Tipo detectado: " + cardType);
     return false;
   }
-  report("AUTENTICANDO", "Bloque 4, Key A predeterminada FF FF FF FF FF FF.");
+  report("AUTENTICANDO", "Sector 1 (autenticacion en bloque 7), Key A predeterminada FF FF FF FF FF FF.");
   MFRC522::MIFARE_Key key;
   memset(key.keyByte, 0xFF, sizeof(key.keyByte));
   const auto status = rfid.PCD_Authenticate(MFRC522::PICC_CMD_MF_AUTH_KEY_A,
-                                           DATA_BLOCK, &key, &rfid.uid);
+                                           DATA_BLOCK+3, &key, &rfid.uid);
   if (status != MFRC522::STATUS_OK) {
     report("ERROR_AUTENTICACION", "No se pudo autenticar. Puede haber otra clave o un problema de radio. " +
            String(rfid.GetStatusCodeName(status)));
@@ -254,7 +258,7 @@ bool authenticate() {
   return true;
 }
 
-bool readBlock(byte* data) {
+bool readBlock(byte (&data)[16]) {
   byte buffer[18] = {};
   byte size = sizeof(buffer);
   const auto status = rfid.MIFARE_Read(DATA_BLOCK, buffer, &size);
@@ -401,7 +405,7 @@ void diagnoseCard() {
  if(!checkReader(true)){reply(503,"El RC522 no responde.");return;}
  beginAttempt("DIAGNOSTICO");
  suppressAttendance=true;
- setOperation(OperationState::WAIT_DIAGNOSTIC); waitingNotice=false; armedAtMs=millis();
+ setOperation(OperationState::WAIT_DIAGNOSTIC); waitingNotice=false; lastPollMs=millis()-POLL_MS;armedAtMs=millis();
  report("ESPERANDO_TARJETA","Prueba sin escritura ni registro de asistencia. Acercar una tarjeta.");
  reply(202,"Diagnóstico preparado.");
 }
@@ -437,39 +441,6 @@ void diagnosticReport() {
  }
  server.sendContent("");
 }
-bool pollManual(bool connected) {
- if(!isWritePending()&&!isDiagnosticPending())return false;
- const uint32_t duration=isWritePending()?WRITE_TIMEOUT_MS:DIAGNOSTIC_TIMEOUT_MS;
- if(!connected){
-  setOperation(OperationState::IDLE);
-  report("ERROR_LECTOR","Operación interrumpida: el RC522 no responde.");endAttempt();return true;
- }
- if(millis()-armedAtMs>=duration){
-  setOperation(OperationState::IDLE);
-  report("TIEMPO_AGOTADO","Terminó la espera sin completar una operación.");endAttempt();return true;
- }
- if(millis()-lastPollMs<POLL_MS)return true;
- lastPollMs=millis();
- const Selection selection=selectCard();
- if(selection==Selection::ABSENT){
-  if(!waitingNotice&&millis()-armedAtMs>=5000){
-   waitingNotice=true;
-   if(stage=="ESPERANDO_TARJETA")report("ESPERANDO_TARJETA","RC522 conectado; no se recibió una respuesta ATQA de tarjeta.");
-  }
-  return true;
- }
- // Detection/selection errors precede any write. Keep the original operation
- // armed, its deadline and its error trace; do not require another button click.
- if(selection==Selection::ERROR)return true;
- if(selection==Selection::SELECTED){
-  lastCardUid=hexBytes(rfid.uid.uidByte,rfid.uid.size);lastCardSeenMs=millis();
-  if(isWritePending()){setOperation(OperationState::WRITING);writeSelectedCard();setOperation(OperationState::IDLE);}
-  else
-  {setOperation(OperationState::IDLE);readSelectedCard();releaseCard();}
- }
- setOperation(OperationState::IDLE);endAttempt();
- return true;
-}
 void registerCommonRoutes() {
  server.on("/api/people",HTTP_GET,sendPeople);
  server.on("/api/attempts",HTTP_GET,sendAttempts);
@@ -479,10 +450,6 @@ void registerCommonRoutes() {
  server.on("/api/diagnostic/report",HTTP_GET,diagnosticReport);
 }
 
-#include <LittleFS.h>
-#include <esp_system.h>
-#include <time.h>
-#include <stdlib.h>
 
 constexpr uint32_t SESSION_MS=600000;
 struct AttendanceRecord {
@@ -666,202 +633,6 @@ void exportAttendance() {
  server.sendContent("");
  tickAttendance();
 }
-const char PAGE[] PROGMEM=R"HTML(
-<!doctype html><html lang="es"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>RFID terminal</title>
-<style>
-*{box-sizing:border-box}body{margin:0;background:#000000;color:#FFFFFF;font:16px ui-monospace,Consolas,monospace}
-::selection{background:#FFFFFF;color:#000000}
-option:checked{background:#FFFFFF;color:#000000}
-main{max-width:920px;margin:auto;padding:16px}h1,h2{font-size:1.2rem}section,details{border:1px solid #FFFFFF;padding:16px;margin:16px 0}
-button,input,select,textarea,a{font:inherit;color:#FFFFFF;background:#000000;border:1px solid #FFFFFF;border-radius:0;box-shadow:none}
-button,a{display:inline-block;min-height:44px;padding:10px;margin:6px 6px 6px 0;cursor:pointer}
-button:hover,button:focus-visible,a:focus-visible{color:#000000;background:#FFFFFF}
-:focus-visible{outline:2px solid #FFFFFF;outline-offset:3px}
-button:disabled{border-style:dashed;cursor:not-allowed;opacity:1}
-input,select,textarea{width:100%;padding:10px;min-height:44px;appearance:none}
-option{background:#000000;color:#FFFFFF}input::placeholder{color:#FFFFFF;opacity:1}
-input[type=checkbox]{width:24px;height:24px;min-height:24px;vertical-align:middle;display:inline-grid;place-content:center}
-input[type=checkbox]:checked::after{content:"X";color:#FFFFFF}
-label{display:block;margin:12px 0}pre,dd,output{white-space:pre-wrap;overflow-wrap:anywhere}pre{font-size:.85rem}dd{margin:4px 0 14px}
-[hidden]{display:none!important}summary{cursor:pointer;min-height:44px}textarea{min-height:160px}
-</style><main>
-<h1 id="title">RFID // TERMINAL</h1><p id="version"></p>
-<nav aria-label="Navegación"><a href="/">Asistencia</a><a href="/admin">Administrar tarjetas</a></nav>
-<section aria-label="Estado"><p id="esp">[ESPERANDO] ESP32</p><p id="connection">[ESPERANDO] RC522</p>
-<p id="detection">[ESPERANDO] Tarjeta</p><p id="message" role="status" aria-live="polite"></p><p id="remaining"></p></section>
-<section id="attendance" hidden><h2>ASISTENCIA</h2>
-<p id="attendanceMessage" role="status" aria-live="polite"></p><p id="lesson"></p><p id="countdown"></p><p id="clockState"></p>
-<ul id="present"></ul><button id="sync">Sincronizar hora del teléfono</button><a href="/api/attendance/export" download>Descargar registros</a>
-<div id="initialize" hidden><p>[ERROR] LittleFS no disponible. Inicializar puede borrar datos previos. No se hace automáticamente.</p>
-<label>Confirmación: escribir INICIALIZAR<input id="storageConfirmation" autocomplete="off"></label><button id="initStorage">Inicializar almacenamiento</button></div></section>
-<section id="writer" hidden><h2>CONFIGURAR TARJETA</h2>
-<form id="writeForm"><label>Persona<select id="person" name="personId"></select></label>
-<p>Card ID fijo: <output id="requestedId"></output></p>
-<label><input id="confirm" type="checkbox" required> Confirmo sobrescribir solo el bloque 4 de la próxima tarjeta.</label>
-<button id="prepare" disabled>Preparar escritura</button></form></section>
-<section><h2>DIAGNÓSTICO SIN ESCRITURA</h2>
-<button id="diagnose" disabled>Probar tarjeta sin escribir</button><button id="resetReader" disabled>Reiniciar RC522</button>
-<button id="cancel" disabled>Cancelar espera</button><button id="copy">Copiar diagnóstico</button>
-<p id="requestError" role="status" aria-live="polite"></p>
-<label id="copyFallback" hidden>Informe seleccionable<textarea id="report" readonly></textarea></label>
-<dl><dt>UID (solo técnico)</dt><dd id="uid">—</dd><dt>Tipo</dt><dd id="type">—</dd><dt>Card ID leído</dt><dd id="cardId">—</dd>
-<dt>Bloque 4 leído</dt><dd id="blockHex">—</dd><dt>16 bytes solicitados</dt><dd id="expectedHex">—</dd></dl>
-<pre id="trace"></pre></section><section><h2>ÚLTIMOS 20 INTENTOS // RAM</h2><div id="history"></div></section>
-</main><script>
-const $=id=>document.getElementById(id);
-const admin=location.pathname==='/admin'||location.pathname==='/admin/';
-let people=[],peopleLoaded=false,historyText='',presentText='',current=null;
-let bootId=null,historyRevision=null,renderedKey='',disconnected=true;
-let timer=null,syncing=false,syncAgain=false,statusController=null,actionSending=false;
-const busy=s=>!!s&&(s.pending||s.diagnosticPending||s.operation==='WRITING');
-function selectedPerson(){const p=people.find(p=>p.id===$('person').value);$('requestedId').textContent=p?p.cardId:'';$('confirm').checked=false;}
-$('person').addEventListener('change',selectedPerson);
-function showDisconnected(){
- disconnected=true;
- $('esp').textContent='[ERROR] Sin conexión con la ESP32';
- for(const id of ['prepare','diagnose','resetReader','cancel','sync','initStorage'])$(id).disabled=true;
-}
-async function action(path,fields={}){
- if(actionSending)return;
- actionSending=true;$('requestError').textContent='';
- try{
-  const r=await fetch(path,{method:'POST',cache:'no-store',body:new URLSearchParams(fields)});
-  const d=await r.json();$('requestError').textContent=(r.ok?'[OK] ':'[ERROR] ')+d.message;
-  if(r.ok&&path==='/api/write')$('confirm').checked=false;
- }catch(e){$('requestError').textContent='[ERROR] No se pudo confirmar la solicitud; consultar el resultado antes de reintentar.';}
- finally{actionSending=false;requestSync();}
-}
-$('writeForm').addEventListener('submit',e=>{e.preventDefault();action('/api/write',{personId:$('person').value,confirm:$('confirm').checked?'yes':'no'});});
-$('diagnose').onclick=()=>action('/api/diagnose');
-$('resetReader').onclick=()=>action('/api/reader/reset');
-$('cancel').onclick=()=>action('/api/cancel');
-$('sync').onclick=()=>action('/api/time',{epoch:Math.floor(Date.now()/1000)});
-$('initStorage').onclick=()=>action('/api/storage/init',{confirmation:$('storageConfirmation').value});
-$('copy').onclick=async()=>{
- try{
-  const r=await fetch('/api/diagnostic/report',{cache:'no-store'});if(!r.ok)throw Error();
-  const text=await r.text();$('report').value=text;$('copyFallback').hidden=false;
-  try{if(!navigator.clipboard)throw Error();await navigator.clipboard.writeText(text);$('requestError').textContent='[OK] Informe copiado.';}
-  catch(e){$('report').focus();$('report').select();$('requestError').textContent='[OK] Informe seleccionado; copiar manualmente.';}
- }catch(e){$('requestError').textContent='[ERROR] No se pudo obtener el informe.';}
-};
-function renderHistory(attempts){
- const serialized=JSON.stringify(attempts);if(serialized===historyText)return;historyText=serialized;
- const open=new Set([...$('history').querySelectorAll('details[open]')].map(d=>d.dataset.number));
- $('history').replaceChildren();
- for(const a of attempts){
-  const d=document.createElement('details');d.dataset.number=String(a.number);d.open=open.has(String(a.number));
-  const s=document.createElement('summary');s.textContent='#'+a.number+' '+a.kind+' // '+a.stage;
-  const p=document.createElement('pre');p.textContent=a.trace+'\n'+a.message;d.append(s,p);$('history').append(d);
- }
-}
-function renderPeople(list){
- people=list;$('person').replaceChildren();
- for(const p of people){const o=document.createElement('option');o.value=p.id;o.textContent=p.name+' // '+(p.teacher?'docente':'estudiante')+' // '+p.class;$('person').append(o);}
- peopleLoaded=true;selectedPerson();
-}
-function updateCountdown(s){
- const working=busy(s);
- $('remaining').textContent=working?'[ESPERANDO] '+s.remainingSeconds+' segundos':'';
- if(s.attendance){
-  const a=s.attendance,n=a.remainingSeconds,q=a.session;
-  $('countdown').textContent=a.active?'[OK] ABIERTA // '+String(Math.floor(n/60)).padStart(2,'0')+':'+String(n%60).padStart(2,'0'):'[CERRADO] '+(q?q.closeReason:'');
- }
-}
-function render(s){
- document.title=admin?'Administración RFID':'Asistencia RFID';
- $('title').textContent=document.title+' // TERMINAL';$('version').textContent='Firmware '+s.version+' // '+s.mode;
- $('esp').textContent='[OK] ESP32 responde';
- $('connection').textContent=s.connected?'[OK] RC522 // versión '+s.readerVersion:'[ERROR] RC522 sin respuesta';
- $('detection').textContent=s.uid?'[OK] Tarjeta detectada // '+s.uid:'[ESPERANDO] Sin tarjeta identificada en este intento';
- $('message').textContent=s.stage+': '+(s.stage.includes('ERROR')||s.stage==='TIPO_NO_COMPATIBLE'?'[ERROR] ':s.stage==='ESPERANDO_TARJETA'?'[ESPERANDO] ':'[OK] ')+s.message;
- const working=busy(s);
- $('prepare').disabled=!s.connected||working;$('diagnose').disabled=!s.connected||working;
- $('resetReader').disabled=working;$('cancel').disabled=!working;
- $('writer').hidden=!admin;$('attendance').hidden=admin;
- for(const key of ['uid','type','cardId','blockHex','expectedHex'])$(key).textContent=s[key]||'—';
- $('trace').textContent=s.trace;
- if(s.attendance){
-  const a=s.attendance,q=a.session;
-  $('attendanceMessage').textContent=a.message;
-  $('lesson').textContent=q?q.class+' // '+q.teacher+' // Presentes: '+q.presentStudents.length+'/3':'[CERRADO] Sin sesión';
-  $('clockState').textContent=a.clockReady?'[OK] Hora sincronizada (UTC-3)':'[ESPERANDO] Sincronizar la hora del teléfono';
-  const entries=q?q.presentStudents:[];
-  const serialized=JSON.stringify(entries);
-  if(serialized!==presentText){
-   presentText=serialized;$('present').replaceChildren();
-   for(const p of entries){const li=document.createElement('li');li.textContent='[OK] '+p.name+' // '+p.scannedAt;$('present').append(li);}
-  }
-  $('initialize').hidden=a.storageReady;$('sync').disabled=a.active||a.closePending;
-  $('initStorage').disabled=working||a.storageReady;
- }
-}
-function invalidateBoot(nextBoot){
- bootId=nextBoot;historyRevision=null;renderedKey='';historyText='';presentText='';current=null;
- $('history').replaceChildren();$('present').replaceChildren();
- $('trace').textContent='';$('report').value='';$('copyFallback').hidden=true;
- $('confirm').checked=false;
- $('esp').textContent='[ESPERANDO] Sincronizando el inicio de la ESP32';
- for(const id of ['prepare','diagnose','resetReader','cancel','sync','initStorage'])$(id).disabled=true;
-}
-async function fetchJson(path,signal){
- const r=await fetch(path,{cache:'no-store',signal});if(!r.ok)throw Error('HTTP '+r.status);return r.json();
-}
-function pollDelay(){
- return busy(current)||(current&&current.attendance&&(current.attendance.active||current.attendance.closePending))?500:2000;
-}
-function requestSync(){
- clearTimeout(timer);timer=null;
- if(document.hidden)return;
- if(syncing){syncAgain=true;return;}
- synchronize();
-}
-async function synchronize(){
- if(syncing||document.hidden)return;
- syncing=true;syncAgain=false;
- const controller=new AbortController();statusController=controller;
- const timeout=setTimeout(()=>controller.abort(),8000);
- try{
-  const s=await fetchJson('/api/status',controller.signal);
-  if(document.hidden)return;
-  const nextBoot=String(s.bootId);
-  if(nextBoot!==bootId)invalidateBoot(nextBoot);
-  if(!peopleLoaded){
-   const data=await fetchJson('/api/people',controller.signal);
-   if(document.hidden)return;
-   renderPeople(data.people);
-  }
-  if(historyRevision!==s.historyRevision){
-   const data=await fetchJson('/api/attempts',controller.signal);
-   if(document.hidden)return;
-   // A reboot between requests invalidates this entire synchronization.
-   // A full bounded snapshot also replaces entries missed while disconnected.
-   if(String(data.bootId)!==nextBoot){invalidateBoot(String(data.bootId));syncAgain=true;return;}
-   renderHistory(data.attempts);historyRevision=data.historyRevision;
-  }
-  const key=nextBoot+':'+s.stateRevision;
-  if(disconnected||renderedKey!==key){render(s);renderedKey=key;}
-  current=s;updateCountdown(s);disconnected=false;
- }catch(e){if(!document.hidden)showDisconnected();}
- finally{
-  clearTimeout(timeout);statusController=null;syncing=false;
-  if(!document.hidden){const delay=syncAgain?0:pollDelay();syncAgain=false;timer=setTimeout(requestSync,delay);}
- }
-}
-document.addEventListener('visibilitychange',()=>{
- if(document.hidden){clearTimeout(timer);timer=null;if(statusController)statusController.abort();}
- else requestSync();
-});
-window.addEventListener('online',requestSync);
-window.addEventListener('offline',()=>{
- clearTimeout(timer);timer=null;
- if(statusController)statusController.abort();
- showDisconnected();
-});
-requestSync();
-</script></html>
-)HTML";
 
 void sendStatus(){
  server.sendHeader("Cache-Control","no-store");
@@ -876,32 +647,30 @@ void prepareWrite(){
  beginAttempt("ESCRITURA");
  suppressAttendance=true;
  requestedId=PEOPLE[person].card;
- armedAtMs=millis();waitingNotice=false;setOperation(OperationState::WAIT_WRITE);
+ lastPollMs=millis()-POLL_MS;armedAtMs=millis();waitingNotice=false;setOperation(OperationState::WAIT_WRITE);
  report("ESPERANDO_TARJETA","Acercar tarjeta para "+String(PEOPLE[person].name)+" // "+requestedId);
  reply(202,"Escritura preparada.");
 }
 void writeSelectedCard() {
   if(!validCardId(requestedId)){
-    report("ERROR_ESCRITURA","Card ID inválido; no se escribió la tarjeta.");releaseCard();return;
+    report("ERROR_ESCRITURA","Card ID inválido; no se escribió la tarjeta.");return;
   }
   describeCard();
-  if (!authenticate()) { releaseCard(); return; }
+  if (!authenticate()) return;
 
   byte previous[16];
   report("LECTURA_PREVIA", "Leyendo el bloque 4 antes de modificarlo.");
-  if (!readBlock(previous)) { releaseCard(); return; }
+  if (!readBlock(previous)) return;
   report("CONTENIDO_PREVIO", blockHex);
 
   byte desired[16] = {0};
-  for (size_t i = 0; i < requestedId.length(); ++i)
-    desired[i] = static_cast<byte>(requestedId[i]);
+  memcpy(desired,requestedId.c_str(),requestedId.length());
   expectedHex = hexBytes(desired, sizeof(desired));
   report("ESCRIBIENDO", "Sobrescribiendo solamente el bloque de datos 4.");
   const auto status = rfid.MIFARE_Write(DATA_BLOCK, desired, sizeof(desired));
   if (status != MFRC522::STATUS_OK) {
     report("ERROR_ESCRITURA", "No se confirmo la escritura. Comprobar la tarjeta con el lector. " +
            String(rfid.GetStatusCodeName(status)));
-    releaseCard();
     return;
   }
 
@@ -917,16 +686,19 @@ void writeSelectedCard() {
     report("ESCRITURA_OK", "Card ID escrito y verificado: " + cardId +
            ". Retirar la tarjeta antes de usarla para asistencia.");
   }
-  releaseCard();
 }
 
+
+void sendPage(){
+ server.sendHeader("Cache-Control","no-store");server.send_P(200,"text/html; charset=utf-8",PAGE);
+}
 
 void setup(){
  setenv("TZ","UYT3",1);tzset();
  beginHardware("RFID-ESP32");beginAttendanceStorage();
- server.on("/",HTTP_GET,[]{server.sendHeader("Cache-Control","no-store");server.send_P(200,"text/html; charset=utf-8",PAGE);});
- server.on("/admin",HTTP_GET,[]{server.sendHeader("Cache-Control","no-store");server.send_P(200,"text/html; charset=utf-8",PAGE);});
- server.on("/admin/",HTTP_GET,[]{server.sendHeader("Cache-Control","no-store");server.send_P(200,"text/html; charset=utf-8",PAGE);});
+ server.on("/",HTTP_GET,sendPage);
+ server.on("/admin",HTTP_GET,sendPage);
+ server.on("/admin/",HTTP_GET,sendPage);
  server.on("/api/write",HTTP_POST,prepareWrite);
  server.on("/api/status",HTTP_GET,sendStatus);
  server.on("/api/time",HTTP_POST,synchronizeClock);
@@ -934,26 +706,54 @@ void setup(){
  server.on("/api/attendance/export",HTTP_GET,exportAttendance);
  registerCommonRoutes();server.onNotFound([]{reply(404,"Ruta inexistente.");});server.begin();
 }
-void loop(){
- tickAttendance();server.handleClient();tickAttendance();
- const bool connected=checkReader();
- if(pollManual(connected))return;
+void finishOperation(const char* code,const char* text){
+ setOperation(OperationState::IDLE);report(code,text);endAttempt();
+}
+
+void pollCard(bool connected){
+ const bool manual=isWritePending()||isDiagnosticPending();
+ const uint32_t duration=isWritePending()?WRITE_TIMEOUT_MS:DIAGNOSTIC_TIMEOUT_MS;
+ if(manual&&!connected){finishOperation("ERROR_LECTOR","Operación interrumpida: el RC522 no responde.");return;}
+ if(manual&&millis()-armedAtMs>=duration){finishOperation("TIEMPO_AGOTADO","Terminó la espera sin completar una operación.");return;}
  if(!connected){lastCardUid="";return;}
  if(millis()-lastPollMs<POLL_MS)return;
  lastPollMs=millis();
  const Selection selection=selectCard();
- if(selection==Selection::ABSENT){if(millis()-lastCardSeenMs>=400){lastCardUid="";suppressAttendance=false;}return;}
+ // Detection itself takes time. Never start a late write after its deadline.
+ if(manual&&millis()-armedAtMs>=duration){
+  if(selection==Selection::SELECTED)releaseCard();
+  finishOperation("TIEMPO_AGOTADO","Terminó la espera sin completar una operación.");return;
+ }
+ if(selection==Selection::ABSENT){
+  if(!manual&&millis()-lastCardSeenMs>=400){lastCardUid="";suppressAttendance=false;}
+  if(manual&&!waitingNotice&&millis()-armedAtMs>=5000){
+   waitingNotice=true;
+   if(stage=="ESPERANDO_TARJETA")report("ESPERANDO_TARJETA","RC522 conectado; no se recibió una respuesta ATQA de tarjeta.");
+  }
+  return;
+ }
  if(selection==Selection::ERROR){
-  const String errorStage=stage,errorMessage=message;
-  beginAttempt("LECTURA");report(errorStage.c_str(),errorMessage);endAttempt();lastCardUid="";return;
+  if(!manual){const String code=stage,text=message;beginAttempt("LECTURA");report(code.c_str(),text);endAttempt();lastCardUid="";}
+  return;
  }
- const String uid=hexBytes(rfid.uid.uidByte,rfid.uid.size);lastCardSeenMs=millis();
- if(suppressAttendance){lastCardUid=uid;releaseCard();return;}
- if(uid==lastCardUid){releaseCard();return;}lastCardUid=uid;
- beginAttempt("ASISTENCIA");
- if(readSelectedCard()){
-  attendanceScan(cardId);
-  trace+="[ASISTENCIA] "+attendanceMessage+"\n";
+ lastCardSeenMs=millis();
+ const String uid=hexBytes(rfid.uid.uidByte,rfid.uid.size);
+ if(!manual&&(suppressAttendance||uid==lastCardUid)){releaseCard();return;}
+ lastCardUid=uid;
+ if(!manual)beginAttempt("ASISTENCIA");
+ if(isWritePending()){
+  setOperation(OperationState::WRITING);writeSelectedCard();
+ }else if(readSelectedCard()&&!manual){
+  attendanceScan(cardId);trace+="[ASISTENCIA] "+attendanceMessage+"\n";
  }
- releaseCard();endAttempt();
+ // One cleanup path, including authentication/read/write/verification failures.
+ releaseCard();
+ if(manual)setOperation(OperationState::IDLE);
+ endAttempt();
+}
+
+void loop(){
+ tickAttendance();server.handleClient();tickAttendance();
+ pollCard(checkReader());
+ tickAttendance();
 }

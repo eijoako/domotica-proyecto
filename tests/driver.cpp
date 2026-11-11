@@ -35,6 +35,7 @@ void resetProgram(bool erase=true) {
 
 void configure(const std::string& name, int value) {
   if (name == "version") Fake::version = static_cast<byte>(value);
+  else if(name=="selectDelay")Fake::selectDelayMs=value;
   else if(name=="radioDirty") {Fake::txMode=value?0x80:0;Fake::rxMode=value?0x80:0;Fake::modWidth=value?0:0x26;}
   else if(name=="antennaOff")Fake::antennaOn=!value;
   else if(name=="crypto")Fake::crypto=value;
@@ -160,6 +161,7 @@ int main() {
               << ",\"block\":" << jsonString(hexBytes(Fake::memory[4].data(), 16)).c_str()
               << ",\"writes\":" << Fake::writes << ",\"attempts\":" << Fake::attempts
               << ",\"reads\":" << Fake::reads
+              << ",\"halts\":" << Fake::halts
               << ",\"initializations\":" << Fake::initializations
               << ",\"earlyProbes\":" << Fake::earlyProbes
               << ",\"fieldResets\":" << Fake::fieldResets

@@ -46,7 +46,7 @@ class Firmware {
   reset() {return this.command('RESET');}
   config(key,value) {return this.command('CONFIG '+key+' '+Number(value));}
   card(present,bytes='-') {return this.command('CARD '+Number(present)+' '+bytes);}
-  tick(ms=101) {return this.command('TIME '+ms);}
+  tick(ms=251) {return this.command('TIME '+ms);}
   get(route='/api/status') {return this.command('HTTP GET '+route);}
   async people(){return JSON.parse((await this.get('/api/people')).response).people;}
   async history(){return JSON.parse((await this.get('/api/attempts')).response);}
@@ -442,6 +442,17 @@ async function collisionAndBufferTests(reader){
 }
 
 async function unifiedTests(reader){
+ for(const fault of ['', 'authFail','readFail','writeFail','lostAck','verifyFail'])
+  await check('one card cleanup for write result '+(fault||'success'),async()=>{
+   await reader.reset();await reader.card(true);await reader.arm();
+   if(fault)await reader.config(fault,true);
+   const r=await reader.tick();assert.equal(r.halts,1);assert.equal(r.status.operation,'IDLE');
+  });
+ await check('slow selection crossing the deadline cannot start a write',async()=>{
+  await reader.reset();await reader.card(true);const armed=await reader.arm();
+  await reader.config('selectDelay',20);await reader.command('CLOCK '+(armed.nowMs+59990));
+  const r=await reader.tick(0);expectStage(r,'TIEMPO_AGOTADO');assert.equal(r.writes,0);assert.equal(r.reads,0);assert.equal(r.halts,1);
+ });
  await check('single firmware serves attendance and both admin paths',async()=>{
   await reader.reset();
   for(const route of ['/','/admin','/admin/'])assert.equal((await reader.get(route)).code,200);

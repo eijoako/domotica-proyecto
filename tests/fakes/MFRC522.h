@@ -24,6 +24,8 @@ inline unsigned fieldResets=0;
 inline bool detectCollision=false,selectCollision=false,detectNoRoom=false,selectNoRoom=false,readNoRoom=false;
 inline byte uid[4] = {1, 2, 3, 4};
 inline int writes = 0, attempts = 0, reads = 0, initializations = 0;
+inline uint32_t selectDelayMs=0;
+inline int halts=0;
 inline std::array<std::array<byte, 16>, 64> memory;
 inline void reset() {
   now = 10000; tag = Tag::IDLE; present = false;
@@ -34,6 +36,7 @@ inline void reset() {
   txMode=rxMode=0;modWidth=0x26;antennaOn=true;wakeupTimeout=false;fieldResets=0;
   detectCollision=selectCollision=detectNoRoom=selectNoRoom=readNoRoom=false;
   writes = attempts = reads = initializations = 0;
+  selectDelayMs=0;halts=0;
   for (auto& block : memory) block.fill(0xA5);
   memory[4].fill(0);
 }
@@ -90,6 +93,7 @@ class MFRC522 {
     return STATUS_OK;
   }
   StatusCode PICC_Select(Uid* target) {
+    Fake::now+=Fake::selectDelayMs;
     if(Fake::selectCollision)return STATUS_COLLISION;
     if(Fake::selectNoRoom)return STATUS_NO_ROOM;
     if (Fake::selectFail || Fake::tag != Fake::Tag::READY) return STATUS_ERROR;
@@ -109,7 +113,7 @@ class MFRC522 {
     bool correctKey = true;
     for (byte value : key->keyByte) correctKey = correctKey && value == 0xFF;
     if (Fake::authFail || !Fake::present || Fake::tag != Fake::Tag::ACTIVE ||
-        block != 4 || command != PICC_CMD_MF_AUTH_KEY_A || !correctKey) return STATUS_ERROR;
+        block / 4 != 1 || command != PICC_CMD_MF_AUTH_KEY_A || !correctKey) return STATUS_ERROR;
     Fake::crypto = true;
     return STATUS_OK;
   }
@@ -134,6 +138,6 @@ class MFRC522 {
     ++Fake::writes;
     return Fake::lostAck ? STATUS_TIMEOUT : STATUS_OK;
   }
-  void PICC_HaltA() { if (Fake::tag == Fake::Tag::ACTIVE) Fake::tag = Fake::Tag::HALTED; }
+  void PICC_HaltA() { ++Fake::halts;if (Fake::tag == Fake::Tag::ACTIVE) Fake::tag = Fake::Tag::HALTED; }
   void PCD_StopCrypto1() { Fake::crypto = false; }
 };
