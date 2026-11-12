@@ -8,6 +8,7 @@
 #define HTTP_POST 1
 #define CONTENT_LENGTH_UNKNOWN size_t(-1)
 namespace FakeHTTP {
+inline bool authorized=true;
 inline uint32_t streamAdvanceMs=0;
 inline bool inHandler=false,reentered=false;
 inline unsigned chunks=0;
@@ -62,6 +63,8 @@ class WebServer {
     handlers[{method, path}] = handler;
   }
   template<class F> void onNotFound(F handler) { notFound = handler; }
+  bool authenticate(const char*,const char*){return FakeHTTP::authorized;}
+  void requestAuthentication(){send(401,"text/plain","Credencial requerida");}
   void begin() {}
   void handleClient() { if(FakeHTTP::inHandler)FakeHTTP::reentered=true; }
   void sendHeader(const char* key, const char* value) { headers[key] = value; }

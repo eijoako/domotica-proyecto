@@ -1,7 +1,6 @@
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
-#include <LittleFS.h>
 #include "../lector/lector.ino"
 
 std::string unhex(const std::string& hex) {
@@ -12,8 +11,7 @@ std::string unhex(const std::string& hex) {
   return result;
 }
 
-void resetProgram(bool erase=true) {
-  if(erase)FakeFS::reset();
+void resetProgram() {
   Fake::reset();
   stage = "INICIO"; message = ""; trace = ""; clearCard();
   readerConnected = false;
@@ -26,15 +24,16 @@ void resetProgram(bool erase=true) {
   attemptHead=attemptCount=activeSlot=0;attemptSerial=0;
   for(auto& item:attempts)item=Attempt();
   waitingNotice = false; requestedId = ""; armedAtMs = 0;
-  currentRecord={};storageReady=sessionValid=false;attendanceState=AttendanceState::CLOSED;
-  sessionPath="";attendanceMessage="[CERRADO] Pase tarjeta de docente.";
-  openedMs=lastCloseAttempt=clockAtMs=0;clockEpoch=0;
+  sessionValid=sessionActive=false;sessionTeacher=0;memset(present,0,sizeof(present));openedMs=0;
+ attendanceMessage="[CERRADO] Pase tarjeta de docente.";
   server.args.clear(); server.handlers.clear();
   setup();
 }
 
 void configure(const std::string& name, int value) {
-  if (name == "version") Fake::version = static_cast<byte>(value);
+  if(name=="authDelay")Fake::authDelay=value;
+  else if(name=="readDelay")Fake::readDelay=value;
+  else if (name == "version") Fake::version = static_cast<byte>(value);
   else if(name=="selectDelay")Fake::selectDelayMs=value;
   else if(name=="radioDirty") {Fake::txMode=value?0x80:0;Fake::rxMode=value?0x80:0;Fake::modWidth=value?0:0x26;}
   else if(name=="antennaOff")Fake::antennaOn=!value;
@@ -59,9 +58,7 @@ void configure(const std::string& name, int value) {
   else if (name == "shortRead") Fake::shortRead = value;
   else if (name == "removeOnWrite") Fake::removeOnWrite = value;
   else if (name == "lostAck") Fake::lostAck = value;
-  else if (name == "fsWrite") FakeFS::failWrite=value;
-  else if (name == "fsRename") FakeFS::failRename=value;
-  else if (name == "fsMount") FakeFS::mounted=value;
+  else if(name=="auth")FakeHTTP::authorized=value;
   else if (name == "streamAdvance") FakeHTTP::streamAdvanceMs=value;
   else if (name == "networkStall") FakeHTTP::stallSocket=value;
   else if (name == "networkFail") FakeHTTP::failSocket=value;
@@ -94,14 +91,7 @@ int main() {
     uint32_t historyBefore=0;
     bool transportClosed=false,transportComplete=true;
     if (op == "RESET") resetProgram();
-    else if(op=="LOADRECORD"){
-      std::string encoded;line>>encoded;const auto bytes=unhex(encoded);
-      FakeFS::files["/sessions/legacy.bin"]=std::vector<byte>(bytes.begin(),bytes.end());
-    }
-    else if(op=="REBOOT")resetProgram(false);
-    else if(op=="CORRUPT"){
-      for(auto& item:FakeFS::files)if(item.first.find(".bin")!=std::string::npos&&!item.second.empty()){item.second[0]^=1;break;}
-    }
+    else if(op=="REBOOT")resetProgram();
     else if (op == "CARD") {
       int present;
       std::string bytes;
@@ -134,7 +124,7 @@ int main() {
       server.args.clear();
       checkHistory=method=="GET";
       if(checkHistory)historyBefore=historyFingerprint();
-      const char* key=path=="/api/time"?"epoch":path=="/api/storage/init"?"confirmation":"personId";
+      const char* key="personId";
       if (!id.empty()) server.args[key] = unhex(id).c_str();
       if (!confirmation.empty()) server.args["confirm"] = unhex(confirmation).c_str();
       server.dispatch(method == "GET" ? HTTP_GET : HTTP_POST, path);
@@ -165,7 +155,6 @@ int main() {
               << ",\"initializations\":" << Fake::initializations
               << ",\"earlyProbes\":" << Fake::earlyProbes
               << ",\"fieldResets\":" << Fake::fieldResets
-              << ",\"formats\":" << FakeFS::formats
               << ",\"historyUnchanged\":" << (!checkHistory||historyBefore==historyFingerprint()?"true":"false")
               << ",\"httpReentered\":" << (FakeHTTP::reentered?"true":"false")
               << ",\"streamChunks\":" << FakeHTTP::chunks

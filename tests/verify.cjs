@@ -111,7 +111,7 @@ async function nativeTests(writer,reader) {
   ]) await check('handle '+fault,async()=>{
     await writer.reset();await writer.config(fault,true);await writer.card(true);
     await writer.arm();const r=await writer.tick();expectStage(r,stage);
-    assert.equal(r.writes,writes);assert.equal(r.status.pending,['selectFail','detectFail'].includes(fault));
+    assert.equal(r.writes,writes);assert.equal(r.status.pending,['selectFail','detectFail','authFail','readFail'].includes(fault));
   });
   await check('short read is not described as success',async()=>{
     await writer.reset();await writer.config('shortRead',true);await writer.card(true);await writer.arm();
@@ -218,7 +218,6 @@ async function scan(firmware,id){
 }
 async function openClass(reader,teacher='PROF_01'){
  await reader.reset();
- assert.equal((await reader.post('/api/time','1800000000')).code,200);
  const r=await scan(reader,teacher);assert(r.status.attendance.active);return r;
 }
 async function newFeatureTests(writer,reader){
@@ -265,11 +264,6 @@ async function newFeatureTests(writer,reader){
   expectStage(r,'TIEMPO_AGOTADO');assert(!r.status.diagnosticPending);assert.equal(r.attempts,0);
   await f.post('/api/diagnose');expectStage(await f.post('/api/cancel'),'CANCELADO');
  });
- await check('clock prerequisite and validation',async()=>{
-  await reader.reset();let r=await scan(reader,'PROF_01');assert(!r.status.attendance.active);
-  for(const invalid of ['abc','0','1800000000bad'])assert.equal((await reader.post('/api/time',invalid)).code,400);
-  assert.equal((await reader.post('/api/time','1800000000')).code,200);
- });
  await check('cancelling diagnosis cannot count the card left on the reader',async()=>{
   await openClass(reader);await reader.post('/api/diagnose');await reader.card(true,cardBlock(CARDS.ALU_01));
   await reader.post('/api/cancel');let r=await reader.tick();assert.equal(r.status.attendance.session.presentStudents.length,0);
@@ -285,60 +279,10 @@ async function newFeatureTests(writer,reader){
   r=await scan(reader,teacher==='PROF_01'?'PROF_02':'PROF_01');assert.equal(r.status.attendance.session.teacherId,teacher);
   r=await scan(reader,'UNKNOWN');assert(r.status.attendance.message.includes('no registrada'));
   await scan(reader,own[1]);r=await scan(reader,own[2]);assert.equal(r.status.attendance.session.presentStudents.length,3);
-  assert.equal((await reader.post('/api/time','1800000010')).code,409);
-  assert.equal((await reader.post('/api/reader/reset')).code,200);
-  assert((await reader.get()).status.attendance.active);assert.equal((await reader.get()).status.attendance.session.presentStudents.length,3);
-  r=await reader.tick(600000);assert(!r.status.attendance.active);assert.equal(r.status.attendance.session.closeReason,'TIMEOUT');
-  assert.equal(r.status.attendance.session.presentStudents.length,3);
-  const exported=(await reader.get('/api/attendance/export')).response.trim().split('\n').map(JSON.parse);
-  assert.equal(exported[0].presentStudents.length,3);
-  r=await reader.command('REBOOT');assert.equal(r.status.attendance.session.presentStudents.length,3);
-  assert.equal(r.status.attendance.session.closeReason,'TIMEOUT');assert(!r.status.attendance.clockReady);assert.equal(r.formats,0);
- });
- await check('reboot preserves scans and closes an interrupted session',async()=>{
-  await openClass(reader);await scan(reader,'ALU_01');
-  const r=await reader.command('REBOOT');assert(!r.status.attendance.active);
-  assert.equal(r.status.attendance.session.presentStudents.length,1);
-  assert.equal(r.status.attendance.session.closeReason,'DEVICE_RESTART');assert.equal(r.formats,0);
- });
- for(const failure of ['fsWrite','fsRename'])await check('failed persistence rolls back scan '+failure,async()=>{
-  await openClass(reader);await scan(reader,'ALU_01');await reader.config(failure,true);
-  let r=await scan(reader,'ALU_02');assert.equal(r.status.attendance.session.presentStudents.length,1);
-  assert(r.status.attendance.message.includes('No se pudo guardar'));
-  await reader.config(failure,false);r=await reader.command('REBOOT');assert.equal(r.status.attendance.session.presentStudents.length,1);
- });
- await check('failed final save closes intake and retries',async()=>{
-  await openClass(reader);await scan(reader,'ALU_01');await reader.config('fsRename',true);
-  let r=await reader.tick(600000);assert(r.status.attendance.closePending);assert(!r.status.attendance.active);
-  r=await scan(reader,'ALU_02');assert.equal(r.status.attendance.session.presentStudents.length,1);
-  await reader.config('fsRename',false);r=await reader.tick(5000);
-  assert(!r.status.attendance.closePending);assert.equal(r.status.attendance.session.closeReason,'TIMEOUT');
- });
- await check('cannot open a class when its first save fails',async()=>{
-  await reader.reset();await reader.post('/api/time','1800000000');await reader.config('fsWrite',true);
-  const r=await scan(reader,'PROF_01');assert(!r.status.attendance.active);assert.equal(r.status.attendance.session,null);
- });
- await check('multiple class sessions retained in export',async()=>{
-  await openClass(reader);await scan(reader,'ALU_01');await reader.tick(600000);
-  await scan(reader,'PROF_02');await scan(reader,'ALU_04');
-  let r=await reader.get('/api/attendance/export');let rows=r.response.trim().split('\n').map(JSON.parse);
-  assert.equal(rows.length,2);assert(rows.every(x=>x.presentStudents.length===1));
-  await reader.command('REBOOT');r=await reader.get('/api/attendance/export');rows=r.response.trim().split('\n').map(JSON.parse);
-  assert.equal(rows.length,2);assert(rows.some(x=>x.closeReason==='DEVICE_RESTART'));
- });
- await check('no automatic format, explicit first initialization only',async()=>{
-  await reader.reset();await reader.config('fsMount',false);let r=await reader.command('REBOOT');
-  assert(!r.status.attendance.storageReady);assert.equal(r.formats,0);
-  assert.equal((await reader.post('/api/storage/init','no')).code,400);
-  r=await reader.post('/api/storage/init','INICIALIZAR');assert.equal(r.code,200);assert.equal(r.formats,1);
-  assert.equal((await reader.post('/api/storage/init','INICIALIZAR')).code,409);
- });
- await check('corrupt files block writes without formatting',async()=>{
-  await openClass(reader);await scan(reader,'ALU_01');await reader.command('CORRUPT');
-  const r=await reader.command('REBOOT');assert(!r.status.attendance.storageReady);assert.equal(r.formats,0);
+  r=await reader.tick(600000);assert(!r.status.attendance.active);assert.equal(r.status.attendance.session.presentStudents.length,3);
+  r=await reader.command('REBOOT');assert.equal(r.status.attendance.session,null);
  });
 }
-
 
 async function detectionRecoveryTests(reader){
  for(const mode of ['attendance','diagnostic','write']){
@@ -378,7 +322,7 @@ async function detectionRecoveryTests(reader){
   await openClass(reader);await scan(reader,'ALU_01');await reader.config('tagState',2);
   await reader.tick(2001);await reader.post('/api/reader/reset');let r=await reader.tick();assert(r.status.attendance.active);
   assert.equal(r.status.attendance.session.presentStudents.length,1);
-  r=await reader.command('REBOOT');assert.equal(r.status.attendance.session.presentStudents.length,1);
+  r=await reader.command('REBOOT');assert.equal(r.status.attendance.session,null);
  });
 }
 
@@ -446,7 +390,7 @@ async function unifiedTests(reader){
   await check('one card cleanup for write result '+(fault||'success'),async()=>{
    await reader.reset();await reader.card(true);await reader.arm();
    if(fault)await reader.config(fault,true);
-   const r=await reader.tick();assert.equal(r.halts,1);assert.equal(r.status.operation,'IDLE');
+   const r=await reader.tick();assert.equal(r.halts,1);assert.equal(r.status.operation,['authFail','readFail'].includes(fault)?'WAIT_WRITE':'IDLE');
   });
  await check('slow selection crossing the deadline cannot start a write',async()=>{
   await reader.reset();await reader.card(true);const armed=await reader.arm();
@@ -477,7 +421,7 @@ async function unifiedTests(reader){
   await openClass(reader);await reader.card(false);await reader.tick(599000);
   await reader.arm('ALU_01');const r=await reader.tick(1001);
   assert(r.status.pending);assert(!r.status.attendance.active);
-  assert.equal(r.status.attendance.session.closeReason,'TIMEOUT');
+  assert(!r.status.attendance.active);
  });
  await check('cancelled writing cannot turn an administrative card into attendance',async()=>{
   await openClass(reader);await reader.arm('ALU_01');
@@ -560,75 +504,23 @@ async function optimizationTests(writer,reader){
   r=await writer.post('/api/cancel');assert.equal(r.status.operation,'IDLE');
   r=await writer.post('/api/diagnose');assert.equal(r.status.operation,'WAIT_DIAGNOSTIC');
  });
- await check('streaming export evaluates class deadline without HTTP reentry',async()=>{
-  await openClass(reader);await scan(reader,'ALU_01');await reader.tick(600000);
-  await scan(reader,'PROF_02');await scan(reader,'ALU_04');
-  await reader.config('streamAdvance',200001);
-  const r=await reader.get('/api/attendance/export');
-  assert.equal(r.code,200);assert(r.streamChunks>=3);
-  assert.equal(r.httpReentered,false);
-  assert.equal(r.status.attendance.active,false);assert.equal(r.status.attendance.session.closeReason,'TIMEOUT');
-  assert.equal(r.status.attendance.session.presentStudents.length,1);
-  await reader.config('streamAdvance',0);
+}
+
+async function ramAuditTests(f){
+ for(const route of ['/api/write','/api/diagnose','/api/cancel','/api/reader/reset']){
+  await check('server rejects unauthorized '+route,async()=>{await f.reset();await f.config('auth',false);assert.equal((await f.post(route,'ALU_01','yes')).code,401);await f.config('auth',true);});
+ }
+ await check('admin page protected',async()=>{await f.reset();await f.config('auth',false);assert.equal((await f.get('/admin')).code,401);assert.equal((await f.get('/')).code,200);await f.config('auth',true);});
+ for(const route of ['/api/time','/api/storage/init','/api/attendance/export'])await check('removed route '+route,async()=>{await f.reset();assert.equal((await f.get(route)).code,404);assert.equal((await f.post(route)).code,404);});
+ await check('RAM session rules and reboot',async()=>{
+  await openClass(f);await scan(f,'ALU_01');await scan(f,'ALU_01');assert.equal((await f.get()).status.attendance.session.presentStudents.length,1);
+  await scan(f,'ALU_04');assert.equal((await f.get()).status.attendance.session.presentStudents.length,1);
+  await scan(f,'PROF_02');assert.equal((await f.get()).status.attendance.session.teacherId,'PROF_01');
+  await f.command('REBOOT');assert.equal((await f.get()).status.attendance.session,null);
  });
- await check('legacy 84-byte record is read without migration',async()=>{
-  await reader.reset();
-  const fixture=fs.readFileSync(path.join(__dirname,'fixtures','attendance-v1.hex'),'utf8').trim();
-  assert.equal(fixture.length,168);await reader.command('LOADRECORD '+fixture);
-  const r=await reader.command('REBOOT'),session=r.status.attendance.session;
-  assert.equal(r.status.attendance.storageReady,true);
-  assert.equal(session.teacherId,'PROF_01');assert.equal(session.class,'Ingeniería');
-  assert.equal(session.closeReason,'TIMEOUT');assert.equal(session.openedAt,'2027-01-15T05:00:00-03:00');
-  assert.equal(session.closedAt,'2027-01-15T05:10:00-03:00');
-  assert.deepEqual(session.presentStudents,[{id:'ALU_01',name:'Lucía Fernández',scannedAt:'2027-01-15T05:00:02-03:00'}]);
-  assert.equal(r.formats,0);
- });
- await check('25-record export cannot defer timeout or recursively serve HTTP',async()=>{
-  await reader.reset();await reader.post('/api/time','1800000000');
-  for(let i=0;i<24;++i){await scan(reader,i%2?'PROF_02':'PROF_01');await scan(reader,i%2?'ALU_04':'ALU_01');await reader.tick(600000);}
-  await scan(reader,'PROF_01');await scan(reader,'ALU_01');
-  await reader.config('streamAdvance',25000);
-  const r=await reader.get('/api/attendance/export');
-  assert.equal(r.response.trim().split('\n').length,25);
-  assert(r.streamChunks>=26);assert.equal(r.httpReentered,false);
-  assert.equal(r.status.attendance.active,false);assert.equal(r.status.attendance.session.closeReason,'TIMEOUT');
-  await reader.config('streamAdvance',0);
- });
- await check('cooperative stream handles partial writes and bounded batches',async()=>{
-  await reader.reset();await reader.command('ATTEMPTS 20');
-  const expected=await reader.history();await reader.config('networkPartial',3);
-  const r=await reader.get('/api/attempts');assert.equal(r.transportComplete,true);assert.equal(r.transportClosed,false);
-  assert.deepEqual(JSON.parse(r.response),expected);assert(r.maxWriteBatch<=512);assert(r.socketCalls>20);
-  await reader.config('networkPartial',0);
- });
- await check('EAGAIN serves attendance deadline and aborts stalled receiver',async()=>{
-  await openClass(reader);await scan(reader,'ALU_01');await reader.tick(599200);
-  await reader.config('networkStall',true);const before=(await reader.command('STATUS')).nowMs;
-  const r=await reader.get('/api/attendance/export');
-  assert(r.transportClosed);assert(!r.transportComplete);assert.equal(r.httpReentered,false);
-  assert.equal(r.status.attendance.active,false);assert.equal(r.status.attendance.session.closeReason,'TIMEOUT');
-  assert(r.nowMs-before<=400,'Stalled send was not bounded by the no-progress budget');
-  await reader.config('networkStall',false);
- });
- await check('slow progressing receiver is bounded by total-write budget',async()=>{
-  await openClass(reader);await scan(reader,'ALU_01');
-  await reader.config('networkPartial',1);await reader.config('networkAdvance',100);
-  const before=(await reader.command('STATUS')).nowMs;
-  const r=await reader.get('/api/attendance/export');
-  assert(r.transportClosed);assert(!r.transportComplete);assert.equal(r.httpReentered,false);
-  assert(r.nowMs-before<=2700,'Progressing send exceeded its bounded frame/body budget');
-  await reader.config('networkPartial',0);await reader.config('networkAdvance',0);
- });
- for(const fault of ['networkFail','networkZero'])await check('cooperative stream closes on '+fault,async()=>{
-  await reader.reset();await reader.command('ATTEMPTS 1');await reader.config(fault,true);
-  const r=await reader.get('/api/attempts');assert(r.transportClosed);assert(!r.transportComplete);assert.equal(r.httpReentered,false);
-  await reader.config(fault,false);
- });
- await check('cooperative stream retries a transient EINTR',async()=>{
-  await reader.reset();await reader.command('ATTEMPTS 1');await reader.config('networkInterrupts',1);
-  const r=await reader.get('/api/attempts');assert(r.transportComplete);assert(!r.transportClosed);
-  assert.equal(JSON.parse(r.response).attempts.length,1);assert(r.socketCalls>1);
- });
+ await check('session survives millis wrap',async()=>{await f.reset();await f.command('CLOCK 4294900000');await scan(f,'PROF_01');await f.tick(599000);assert((await f.get()).status.attendance.active);await f.tick(1001);assert(!(await f.get()).status.attendance.active);});
+ for(const fault of ['authFail','readFail'])await check('retry '+fault+' before write',async()=>{await f.reset();await f.card(true);await f.arm();await f.config(fault,true);assert((await f.tick()).status.pending);await f.config(fault,false);expectStage(await f.tick(),'ESCRITURA_OK');});
+ for(const delay of ['authDelay','readDelay'])await check('deadline during '+delay,async()=>{await f.reset();await f.card(true);await f.arm();await f.config(delay,60001);const r=await f.tick();expectStage(r,'TIEMPO_AGOTADO');assert.equal(r.writes,0);});
 }
 
 async function serve(firmware) {
@@ -644,10 +536,11 @@ async function serve(firmware) {
       if(isStatus&&stats.statusDelay)await new Promise(resolve=>setTimeout(resolve,stats.statusDelay));
       let body='';for await(const chunk of req) body+=chunk;
       const fields=new URLSearchParams(body);
+      await firmware.config('auth',req.headers.authorization==='Basic '+Buffer.from('admin:cambiar-clave-admin').toString('base64'));
       const result=req.method==='POST'?
-        await firmware.post(req.url,fields.get('personId')||fields.get('epoch')||fields.get('confirmation')||'',fields.get('confirm')||''):
+        await firmware.post(req.url,fields.get('personId')||'',fields.get('confirm')||''):
         await firmware.get(req.url);
-      res.writeHead(result.code,{'Content-Type':['/','/admin','/admin/'].includes(req.url)?'text/html; charset=utf-8':'application/json; charset=utf-8','Cache-Control':result.cache});
+      res.writeHead(result.code,{'WWW-Authenticate':'Basic realm="RFID"','Content-Type':['/','/admin','/admin/'].includes(req.url)?'text/html; charset=utf-8':'application/json; charset=utf-8','Cache-Control':result.cache});
       res.end(result.response);
     } catch(error) {res.writeHead(500);res.end(String(error));}
   });
@@ -660,13 +553,18 @@ async function browserTests(writer,reader) {
  const {chromium}=require('playwright');
  const browser=await chromium.launch({executablePath:process.env.CHROMIUM_PATH||(fs.existsSync('/usr/bin/chromium')?'/usr/bin/chromium':undefined),headless:true,args:['--no-sandbox']});
  const w=await serve(writer),r=await serve(reader);
- const page=await browser.newPage({viewport:{width:390,height:844}});
+ const page=await browser.newPage({httpCredentials:{username:'admin',password:'cambiar-clave-admin'},viewport:{width:390,height:844}});
  await page.addInitScript(()=>Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:async()=>{throw Error('HTTP clipboard unavailable');}}}));
  const errors=[];page.on('pageerror',e=>errors.push(String(e)));
  const stage=expected=>page.waitForFunction(text=>document.getElementById('message').textContent.startsWith(text+':'),expected);
  const ready=()=>page.waitForFunction(()=>!document.getElementById('prepare').disabled);
  try{
   await writer.reset();await page.goto(w.url+'/admin');await ready();
+  const anonymous=await browser.newContext();
+  assert.equal((await anonymous.request.get(w.url+'/admin')).status(),401);
+  assert.equal((await anonymous.request.post(w.url+'/api/write',{form:{personId:'ALU_01',confirm:'yes'}})).status(),401);
+  assert.equal((await anonymous.request.get(w.url+'/admin',{headers:{Authorization:'Basic '+Buffer.from('admin:incorrecta').toString('base64')}})).status(),401);
+  await anonymous.close();
   assert(await page.locator('#writer').isVisible());assert(await page.locator('#attendance').isHidden());
   assert.equal(await page.locator('#person option').count(),8);
   assert.equal(await page.locator('input[name=cardId]').count(),0);
@@ -718,7 +616,13 @@ async function browserTests(writer,reader) {
   assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
   await page.screenshot({path:path.join(output,'lector-mobile.png'),fullPage:true});
   assert.deepEqual(errors,[]);
-  console.log('Chromium: fixed selector, monochrome UI, diagnosis, report fallback, attendance and recovery passed');
+  await page.waitForFunction(()=>!document.getElementById('diagnose').disabled);
+  await page.route('**/api/diagnose',()=>{});
+  await page.locator('#diagnose').click();
+  await page.waitForFunction(()=>document.getElementById('requestError').textContent.includes('consultar el resultado'),null,{timeout:12000});
+  assert.equal(await page.evaluate(()=>actionSending),false);
+  await page.unroute('**/api/diagnose');
+  console.log('Chromium: protected administration, action timeout, monochrome UI, diagnosis, RAM attendance passed');
  }finally{await page.close();await browser.close();await w.close();await r.close();}
 }
 
@@ -726,7 +630,7 @@ async function browserTests(writer,reader) {
 async function browserOptimizationTests(writer) {
  const {chromium}=require('playwright');
  const browser=await chromium.launch({executablePath:process.env.CHROMIUM_PATH||(fs.existsSync('/usr/bin/chromium')?'/usr/bin/chromium':undefined),headless:true,args:['--no-sandbox']});
- const service=await serve(writer),page=await browser.newPage({viewport:{width:390,height:844}});
+ const service=await serve(writer),page=await browser.newPage({httpCredentials:{username:'admin',password:'cambiar-clave-admin'},viewport:{width:390,height:844}});
  const errors=[];page.on('pageerror',e=>errors.push(String(e)));
  const pending=new Set();let peak=0;
  page.on('request',req=>{if(new URL(req.url()).pathname==='/api/status'){pending.add(req);peak=Math.max(peak,pending.size);}});
@@ -775,7 +679,7 @@ async function browserOptimizationTests(writer) {
   await page.waitForFunction(()=>document.getElementById('esp').textContent.includes('[OK]'));
   await page.waitForTimeout(150);
   assert(service.stats.counts['/api/status']>beforeHidden,'Visible tab did not synchronize immediately');
-  const second=await browser.newPage();
+  const second=await browser.newPage({httpCredentials:{username:'admin',password:'cambiar-clave-admin'}});
   try{
    await second.goto(service.url+'/admin');await second.waitForFunction(()=>!document.getElementById('prepare').disabled);
    await writer.command('ATTEMPTS 1');
@@ -798,6 +702,7 @@ async function browserOptimizationTests(writer) {
   await detectionRecoveryTests(reader);
   await collisionAndBufferTests(reader);
   await optimizationTests(writer,reader);
+  await ramAuditTests(reader);
   if(!process.argv.includes('--native-only')&&!failures.length)
     await check('real browser end-to-end',()=>browserTests(writer,reader));
   if(!process.argv.includes('--native-only')&&!failures.length)

@@ -24,10 +24,8 @@ label{display:block;margin:12px 0}pre,dd,output{white-space:pre-wrap;overflow-wr
 <section aria-label="Estado"><p id="esp">[ESPERANDO] ESP32</p><p id="connection">[ESPERANDO] RC522</p>
 <p id="detection">[ESPERANDO] Tarjeta</p><p id="message" role="status" aria-live="polite"></p><p id="remaining"></p></section>
 <section id="attendance" hidden><h2>ASISTENCIA</h2>
-<p id="attendanceMessage" role="status" aria-live="polite"></p><p id="lesson"></p><p id="countdown"></p><p id="clockState"></p>
-<ul id="present"></ul><button id="sync">Sincronizar hora del teléfono</button><a href="/api/attendance/export" download>Descargar registros</a>
-<div id="initialize" hidden><p>[ERROR] LittleFS no disponible. Inicializar puede borrar datos previos. No se hace automáticamente.</p>
-<label>Confirmación: escribir INICIALIZAR<input id="storageConfirmation" autocomplete="off"></label><button id="initStorage">Inicializar almacenamiento</button></div></section>
+<p id="attendanceMessage" role="status" aria-live="polite"></p><p id="lesson"></p><p id="countdown"></p>
+<ul id="present"></ul></section>
 <section id="writer" hidden><h2>CONFIGURAR TARJETA</h2>
 <form id="writeForm"><label>Persona<select id="person" name="personId"></select></label>
 <p>Card ID fijo: <output id="requestedId"></output></p>
@@ -53,13 +51,21 @@ $('person').addEventListener('change',selectedPerson);
 function showDisconnected(){
  disconnected=true;
  $('esp').textContent='[ERROR] Sin conexión con la ESP32';
- for(const id of ['prepare','diagnose','resetReader','cancel','sync','initStorage'])$(id).disabled=true;
+ for(const id of ['prepare','diagnose','resetReader','cancel'])$(id).disabled=true;
+}
+async function timedFetch(path,options={}){
+ const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),8000);
+ try{
+  const response=await fetch(path,{...options,signal:controller.signal});
+  const body=await response.text();
+  return {ok:response.ok,json:async()=>JSON.parse(body),text:async()=>body};
+ }finally{clearTimeout(timeout);}
 }
 async function action(path,fields={}){
  if(actionSending)return;
  actionSending=true;$('requestError').textContent='';
  try{
-  const r=await fetch(path,{method:'POST',cache:'no-store',body:new URLSearchParams(fields)});
+  const r=await timedFetch(path,{method:'POST',cache:'no-store',body:new URLSearchParams(fields)});
   const d=await r.json();$('requestError').textContent=(r.ok?'[OK] ':'[ERROR] ')+d.message;
   if(r.ok&&path==='/api/write')$('confirm').checked=false;
  }catch(e){$('requestError').textContent='[ERROR] No se pudo confirmar la solicitud; consultar el resultado antes de reintentar.';}
@@ -69,11 +75,9 @@ $('writeForm').addEventListener('submit',e=>{e.preventDefault();action('/api/wri
 $('diagnose').onclick=()=>action('/api/diagnose');
 $('resetReader').onclick=()=>action('/api/reader/reset');
 $('cancel').onclick=()=>action('/api/cancel');
-$('sync').onclick=()=>action('/api/time',{epoch:Math.floor(Date.now()/1000)});
-$('initStorage').onclick=()=>action('/api/storage/init',{confirmation:$('storageConfirmation').value});
 $('copy').onclick=async()=>{
  try{
-  const r=await fetch('/api/diagnostic/report',{cache:'no-store'});if(!r.ok)throw Error();
+  const r=await timedFetch('/api/diagnostic/report',{cache:'no-store'});if(!r.ok)throw Error();
   const text=await r.text();$('report').value=text;$('copyFallback').hidden=false;
   try{if(!navigator.clipboard)throw Error();await navigator.clipboard.writeText(text);$('requestError').textContent='[OK] Informe copiado.';}
   catch(e){$('report').focus();$('report').select();$('requestError').textContent='[OK] Informe seleccionado; copiar manualmente.';}
@@ -91,7 +95,7 @@ function renderHistory(attempts){
 }
 function renderPeople(list){
  people=list;$('person').replaceChildren();
- for(const p of people){const o=document.createElement('option');o.value=p.id;o.textContent=p.name+' // '+(p.teacher?'docente':'estudiante')+' // '+p.class;$('person').append(o);}
+ for(const p of people){const o=document.createElement('option');o.value=p.id;o.textContent=p.name+(p.teacher?'docente':'estudiante')+' // '+p.class;$('person').append(o);}
  peopleLoaded=true;selectedPerson();
 }
 function updateCountdown(s){
@@ -99,7 +103,7 @@ function updateCountdown(s){
  $('remaining').textContent=working?'[ESPERANDO] '+s.remainingSeconds+' segundos':'';
  if(s.attendance){
   const a=s.attendance,n=a.remainingSeconds,q=a.session;
-  $('countdown').textContent=a.active?'[OK] ABIERTA // '+String(Math.floor(n/60)).padStart(2,'0')+':'+String(n%60).padStart(2,'0'):'[CERRADO] '+(q?q.closeReason:'');
+  $('countdown').textContent=a.active?'[OK] ABIERTA // '+String(Math.floor(n/60)).padStart(2,'0')+':'+String(n%60).padStart(2,'0'):'[CERRADO] '+'';
  }
 }
 function render(s){
@@ -118,16 +122,13 @@ function render(s){
  if(s.attendance){
   const a=s.attendance,q=a.session;
   $('attendanceMessage').textContent=a.message;
-  $('lesson').textContent=q?q.class+' // '+q.teacher+' // Presentes: '+q.presentStudents.length+'/3':'[CERRADO] Sin sesión';
-  $('clockState').textContent=a.clockReady?'[OK] Hora sincronizada (UTC-3)':'[ESPERANDO] Sincronizar la hora del teléfono';
+  $('lesson').textContent=q?q.class+' // '+q.teacher+' // Presentes: '+q.presentStudents.length+'/'+q.capacity:'[CERRADO] Sin sesión';
   const entries=q?q.presentStudents:[];
   const serialized=JSON.stringify(entries);
   if(serialized!==presentText){
    presentText=serialized;$('present').replaceChildren();
-   for(const p of entries){const li=document.createElement('li');li.textContent='[OK] '+p.name+' // '+p.scannedAt;$('present').append(li);}
+   for(const p of entries){const li=document.createElement('li');li.textContent='[OK] '+p.name+' // ';$('present').append(li);}
   }
-  $('initialize').hidden=a.storageReady;$('sync').disabled=a.active||a.closePending;
-  $('initStorage').disabled=working||a.storageReady;
  }
 }
 function invalidateBoot(nextBoot){
@@ -136,13 +137,13 @@ function invalidateBoot(nextBoot){
  $('trace').textContent='';$('report').value='';$('copyFallback').hidden=true;
  $('confirm').checked=false;
  $('esp').textContent='[ESPERANDO] Sincronizando el inicio de la ESP32';
- for(const id of ['prepare','diagnose','resetReader','cancel','sync','initStorage'])$(id).disabled=true;
+ for(const id of ['prepare','diagnose','resetReader','cancel'])$(id).disabled=true;
 }
 async function fetchJson(path,signal){
  const r=await fetch(path,{cache:'no-store',signal});if(!r.ok)throw Error('HTTP '+r.status);return r.json();
 }
 function pollDelay(){
- return busy(current)||(current&&current.attendance&&(current.attendance.active||current.attendance.closePending))?500:2000;
+ return busy(current)||(current&&current.attendance&&(current.attendance.active))?500:2000;
 }
 function requestSync(){
  clearTimeout(timer);timer=null;

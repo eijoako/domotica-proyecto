@@ -2,15 +2,15 @@
 
 > Proyecto escolar realizado completamente con **inteligencia artificial y prompt engineering**.
 
-La versión **3.3.0** utiliza un único programa para ESP32 y Arduino IDE:
+La versión **4.0.0** utiliza un único programa para ESP32 y Arduino IDE:
 - **Asistencia:** http://192.168.4.1/
 - **Tarjetas:** http://192.168.4.1/admin
 
-Los datos se conservan en LittleFS, sin base de datos externa. No se necesita PlatformIO, ArduinoJson, generación previa ni Internet para las páginas.
+La sesión y sus presentes existen únicamente en RAM. Se pierden al reiniciar. No hay sistema de archivos ni base de datos. No se necesita PlatformIO, ArduinoJson, generación previa ni Internet para las páginas.
 
 ## Personas y tarjetas
 
-El grupo es fijo; no existen altas, bajas ni edición de personas o clases.
+Las personas, clases y Card ID se editan en [People.h](lector/People.h). No existen altas, bajas ni edición desde la web. Cada fila contiene ID interno, nombre, Card ID, índice de clase (0 para Ingeniería, 1 para Economía) y si es docente. Para agregar o modificar una persona se edita esa estructura y se vuelve a cargar el firmware. Los límites y el total de estudiantes de cada clase se calculan desde los arreglos; no se modifican contadores manualmente. Los ID deben ser únicos, y cada Card ID debe tener de 1 a 16 caracteres ASCII alfanuméricos, guion o guion bajo.
 
 | Persona | ID interno | Clase | Card ID |
 |---|---|---|---|
@@ -44,9 +44,9 @@ El RC522 utiliza **3,3 V**. IRQ queda sin conectar.
 1. Instalar Arduino IDE 2.x.
 2. Agregar en Preferencias la URL del Gestor de placas: `https://espressif.github.io/arduino-esp32/package_esp32_index.json`.
 3. Instalar **esp32 by Espressif Systems** y **MFRC522 de Miguel Balboa 1.4.12**.
-4. Descargar el repositorio y abrir [lector/lector.ino](lector/lector.ino). Deben conservarse [WebPage.h](lector/WebPage.h) y [CooperativeServer.h](lector/CooperativeServer.h) dentro de esa carpeta.
+4. Descargar el repositorio y abrir [lector/lector.ino](lector/lector.ino). Deben conservarse [WebPage.h](lector/WebPage.h) [People.h](lector/People.h) y [CooperativeServer.h](lector/CooperativeServer.h) dentro de esa carpeta.
 5. Seleccionar **ESP32 Dev Module**, elegir el puerto y subir el programa. Si la carga queda en Connecting, mantener BOOT hasta que comience.
-6. Abrir el Monitor serie a **115200 baudios**, reiniciar y comprobar `firmware 3.3.0`.
+6. Abrir el Monitor serie a **115200 baudios**, reiniciar y comprobar `firmware 4.0.0`.
 7. Conectar el teléfono a **RFID-ESP32**, contraseña **cambiar-esta-clave**, y abrir http://192.168.4.1/. La contraseña está definida en `WIFI_PASSWORD`.
 8. Recargar la página después de actualizar el firmware. El teléfono debe permanecer en la red aunque indique que no tiene Internet.
 
@@ -62,20 +62,29 @@ Se autentica el sector 1 con Key A predeterminada `FF FF FF FF FF FF`, utilizand
 
 La espera dura 60 segundos. Los errores previos a la escritura permiten reintentar dentro del mismo plazo o cancelar. Una escritura enviada cuya confirmación falla no se repite automáticamente: su contenido debe verificarse mediante **Probar tarjeta sin escribir**.
 
+## Credencial administrativa
+
+En `lector.ino` se configuran `ADMIN_USER` (inicialmente `admin`) y `ADMIN_PASSWORD` (inicialmente `cambiar-clave-admin`). Debe elegirse una clave propia, distinta de `WIFI_PASSWORD`, y volver a cargar el firmware.
+
+Al abrir **/admin** el navegador solicita esas credenciales mediante HTTP Basic. El servidor las exige también para escribir, preparar un diagnóstico, cancelar y reiniciar el RC522, incluso si la solicitud se realiza directamente sin los botones. La asistencia y la consulta de estado son públicas. Las credenciales se usan en HTTP sin cifrado: es una protección sencilla para una red local controlada, no para exponer el dispositivo en Internet. Para cambiar de usuario puede cerrarse la sesión del navegador o utilizar una ventana privada.
+
+Las acciones web vencen a los ocho segundos, incluida la recepción de su respuesta. Si no se pudo confirmar una escritura, debe consultarse el estado y el contenido de la tarjeta antes de reintentar.
+
 ## Asistencia
 
-1. Volver a **/**. Si LittleFS no está disponible, la inicialización requiere escribir `INICIALIZAR` y pulsar su botón. Puede borrar datos previos; no se ejecuta automáticamente ni se permite con un almacenamiento montado.
-2. Pulsar **Sincronizar hora del teléfono**. Los registros utilizan hora de Uruguay, UTC−3.
-3. Presentar la tarjeta de Ana Martínez para abrir Ingeniería o la de Martín Cabrera para abrir Economía.
-4. Presentar las tarjetas de los tres estudiantes de esa clase. Cada asistencia se guarda antes de confirmarse.
-5. Consultar los presentes y la cuenta regresiva. A los diez minutos la sesión se cierra automáticamente.
-6. Descargar las sesiones mediante **Descargar registros**, en formato NDJSON.
+1. Abrir **/**, sin sincronizar fecha ni hora.
+2. Presentar la tarjeta de Ana Martínez para Ingeniería o la de Martín Cabrera para Economía.
+3. Presentar las tarjetas de los estudiantes de esa clase y comprobar la lista de presentes.
+4. A los diez minutos la sesión se cierra. El tiempo se mide por duración transcurrida, incluso cuando `millis()` se desborda.
+5. Una nueva tarjeta de docente después del cierre abre una sesión nueva y reemplaza la anterior. Reiniciar la ESP32 borra la sesión y los presentes.
 
-No se admiten tarjetas desconocidas ni estudiantes de otra clase. Los duplicados no agregan otro presente y otro docente no reemplaza una sesión abierta. La hora no se modifica durante la sesión.
+Se rechazan tarjetas desconocidas, estudiantes de otra clase y duplicados. Otro docente no reemplaza una sesión abierta. No se guardan ni se muestran horas de entrada, apertura o cierre. No existe exportación ni historial persistente.
 
-La escritura y el diagnóstico pausan la admisión de tarjetas, pero no el reloj ni el cierre. La tarjeta utilizada en administración no marca asistencia hasta retirarse y presentarse nuevamente.
+La escritura y el diagnóstico pausan la admisión de tarjetas, pero no el temporizador de la clase. La tarjeta administrativa debe retirarse y presentarse de nuevo para asistencia.
 
-Los registros mantienen el formato binario anterior de **84 bytes**, checksum y guardado inmediato con archivo temporal y renombrado. Si falla el cierre, queda pendiente y se reintenta sin admitir nuevos presentes. Un reinicio conserva los presentes y cierra la sesión como `DEVICE_RESTART`; después se vuelve a sincronizar la hora. Un archivo dañado se informa sin borrarlo ni formatear.
+## Límites de seguridad de las tarjetas
+
+El Card ID es un identificador copiable. Las tarjetas con la clave predeterminada pueden copiarse o reescribirse; dos tarjetas con el mismo Card ID representan a la misma persona para esta aplicación. Ni el UID, ni la contraseña de la web, ni la verificación de 16 bytes garantizan autenticidad o protección contra clonación. La verificación solo confirma lo leído inmediatamente después de escribir.
 
 ## Diagnóstico
 
@@ -90,16 +99,15 @@ Ambas páginas muestran ESP32, RC522, tarjeta, etapas y los últimos **20 intent
 ## Código y comprobaciones
 
 - `lector.ino`: dispositivo, tarjetas, asistencia y API.
+- `People.h`: personas, clases y Card ID editables.
 - `WebPage.h`: interfaz monocromática, sin recursos externos.
 - `CooperativeServer.h`: envío HTTP que sigue comprobando el vencimiento durante descargas.
 - [tests/README.md](tests/README.md): pruebas de firmware y Chromium.
 
 Lectura y escritura utilizan una sola función de atención y una sola limpieza de sesión. La consulta de tarjeta se limita a una cada 250 ms; preparar una operación permite consultar inmediatamente. La selección vuelve a comprobar su plazo antes de iniciar una escritura. Los buffers de lectura se reciben por referencia a un arreglo de 16 bytes para evitar pasar accidentalmente uno menor.
 
-La página consulta personas una vez y el historial solo por revisión. El polling no se solapa y se pausa al ocultar la pestaña. Los GET no modifican los intentos. El servidor mantiene el cierre durante exportaciones, aunque no atiende otras solicitudes ni tarjetas dentro del mismo handler síncrono.
+La página consulta personas una vez y el historial solo por revisión. El polling no se solapa y se pausa al ocultar la pestaña. Los GET no modifican los intentos. El servidor mantiene el temporizador durante respuestas HTTP, aunque no atiende otras solicitudes ni tarjetas dentro del mismo handler síncrono.
 
-Se retiraron el sketch auxiliar duplicado y los informes y scripts históricos de rendimiento. Las pruebas de regresión y la fixture de registros anteriores se conservan.
+Se retiraron las operaciones de almacenamiento, inicialización, formateo, recuperación y exportación, sus rutas y sus pruebas exclusivas. Se conservaron las regresiones de tarjetas y navegador.
 
-La versión 3.3.0 pasó 163 comprobaciones automatizadas y compiló para ESP32 Dev Module con núcleo 3.3.8 y MFRC522 1.4.12: 1061897 bytes de programa y 51924 bytes de variables globales. Estas cifras no miden el heap ni la fragmentación durante el uso.
-
-**La lectura y escritura física reportadas como fallidas todavía requieren confirmación con el equipo. Las pruebas simuladas y la compilación no demuestran por sí solas que ese fallo esté resuelto.**
+La compilación ESP32 y las pruebas se documentan en tests/README.md. Las pruebas simuladas no demuestran que la comunicación física con un RC522 particular funcione; esa comprobación sigue pendiente.

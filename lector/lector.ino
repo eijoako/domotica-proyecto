@@ -6,9 +6,6 @@
 #include <MFRC522.h>
 #include <esp_system.h>
 #include <string.h>
-#include <LittleFS.h>
-#include <time.h>
-#include <stdlib.h>
 #include "WebPage.h"
 
 // ESP32 Dev Module + RC522, powered at 3.3 V.
@@ -19,12 +16,19 @@ constexpr byte PIN_MISO = 19;
 constexpr byte PIN_MOSI = 23;
 constexpr byte DATA_BLOCK = 4;
 constexpr char WIFI_PASSWORD[] = "cambiar-esta-clave";
-constexpr char FIRMWARE_VERSION[] = "3.3.0";
+constexpr char FIRMWARE_VERSION[] = "4.0.0";
 constexpr uint32_t POLL_MS = 250;
 
 MFRC522 rfid(PIN_SS, PIN_RST);
 void tickAttendance();
 CooperativeServer server(80,tickAttendance);
+constexpr char ADMIN_USER[]="admin";
+constexpr char ADMIN_PASSWORD[]="cambiar-clave-admin";
+bool requireAdmin(){
+ if(server.authenticate(ADMIN_USER,ADMIN_PASSWORD))return true;
+ server.requestAuthentication();return false;
+}
+
 String stage = "INICIO";
 String message = "Iniciando RC522";
 String trace;
@@ -39,28 +43,19 @@ Selection selectCard();
 bool checkReader(bool first = false);
 
 
-struct PersonDef { const char* id; const char* name; const char* card; byte group; bool teacher; };
-const char* const CLASSES[] = {"Ingeniería", "Economía"};
-const PersonDef PEOPLE[] = {
- {"ALU_01","Lucía Fernández","A7F3C901",0,false},
- {"ALU_02","Martina Silva","A7F3C902",0,false},
- {"ALU_03","Mateo Rodríguez","A7F3C903",0,false},
- {"ALU_04","Valentina Pereira","A7F3C904",1,false},
- {"ALU_05","Santiago López","A7F3C905",1,false},
- {"ALU_06","Nicolás González","A7F3C906",1,false},
- {"PROF_01","Ana Martínez","B8D4E101",0,true},
- {"PROF_02","Martín Cabrera","B8D4E102",1,true}
-};
+#include "People.h"
 struct Attempt {
  uint32_t number=0, at=0;
  String kind, stage, message, trace, uid, type, card, block, expected;
 };
+String attemptJson(const Attempt& a);
 Attempt attempts[20];
 byte attemptHead=0, attemptCount=0, activeSlot=0;
 uint32_t attemptSerial=0;
 bool attemptOpen=false, suppressAttendance=false;
 
 enum class OperationState { IDLE, WAIT_DIAGNOSTIC, WAIT_WRITE, WRITING };
+void setOperation(OperationState state);
 OperationState operationState=OperationState::IDLE;
 String bootId;
 uint32_t stateRevision=0, historyRevision=0;
@@ -85,7 +80,7 @@ uint32_t armedAtMs=0;
 constexpr uint32_t WRITE_TIMEOUT_MS=60000, DIAGNOSTIC_TIMEOUT_MS=30000;
 String lastCardUid;
 uint32_t lastCardSeenMs=0;
-void writeSelectedCard();
+bool writeSelectedCard();
 bool readBlock(byte (&data)[16]);
 
 // JSON strings are escaped without requiring an extra JSON library.
@@ -299,11 +294,11 @@ void beginHardware(const char* ssid) {
 
 
 int personById(const String& id) {
- for(byte i=0;i<8;++i) if(id==PEOPLE[i].id)return i;
+ for(size_t i=0;i<PERSON_COUNT;++i) if(id==PEOPLE[i].id)return i;
  return -1;
 }
 int personByCard(const String& card) {
- for(byte i=0;i<8;++i) if(card==PEOPLE[i].card)return i;
+ for(size_t i=0;i<PERSON_COUNT;++i) if(card==PEOPLE[i].card)return i;
  return -1;
 }
 void snapshotAttempt() {
@@ -332,7 +327,7 @@ void endAttempt() {
 }
 String peopleJson() {
  String s;s.reserve(1400);s="[";
- for(byte i=0;i<8;++i){
+ for(size_t i=0;i<PERSON_COUNT;++i){
   if(i)s+=",";
   s+="{\"id\":"+jsonString(PEOPLE[i].id)+",\"name\":"+jsonString(PEOPLE[i].name);
   s+=",\"cardId\":"+jsonString(PEOPLE[i].card)+",\"class\":"+jsonString(CLASSES[PEOPLE[i].group]);
@@ -401,6 +396,7 @@ bool readSelectedCard() {
  return true;
 }
 void diagnoseCard() {
+ if(!requireAdmin())return;
  if(operationBusy()){reply(409,"Hay una operación pendiente.");return;}
  if(!checkReader(true)){reply(503,"El RC522 no responde.");return;}
  beginAttempt("DIAGNOSTICO");
@@ -410,11 +406,13 @@ void diagnoseCard() {
  reply(202,"Diagnóstico preparado.");
 }
 void cancelOperation() {
+ if(!requireAdmin())return;
  if(!isWritePending()&&!isDiagnosticPending()){reply(409,"No hay una operación esperando tarjeta; revisar el resultado.");return;}
  setOperation(OperationState::IDLE);
  report("CANCELADO","Operación cancelada."); endAttempt(); reply(200,"Cancelado.");
 }
 void resetReader() {
+ if(!requireAdmin())return;
  if(operationBusy()){reply(409,"Cancelar o terminar la operación antes de reiniciar el RC522.");return;}
  beginAttempt("REINICIO_LECTOR");
  readerConnected=false; lastCardUid="";
@@ -452,196 +450,58 @@ void registerCommonRoutes() {
 
 
 constexpr uint32_t SESSION_MS=600000;
-struct AttendanceRecord {
- uint32_t magic, version, nonce;
- byte teacher, present, reason, reserved;
- int64_t opened, closed, scanned[6];
- uint32_t checksum;
-};
-constexpr size_t RECORD_SIZE=offsetof(AttendanceRecord,checksum)+sizeof(uint32_t);
-static_assert(RECORD_SIZE==84,"Formato de registro incompatible");
-uint32_t recordChecksum(const AttendanceRecord& r);
-bool validRecord(const AttendanceRecord& r);
-bool saveRecord(const String& path,AttendanceRecord r);
-bool readRecord(File& f,AttendanceRecord& r);
-String recordJson(const AttendanceRecord& r);
-AttendanceRecord currentRecord={};
-enum class AttendanceState { CLOSED, OPEN, CLOSE_PENDING };
-AttendanceState attendanceState=AttendanceState::CLOSED;
-void setAttendanceState(AttendanceState state);
-bool isSessionActive(){return attendanceState!=AttendanceState::CLOSED;}
-bool isClosePending(){return attendanceState==AttendanceState::CLOSE_PENDING;}
-void setAttendanceState(AttendanceState state){
- if(attendanceState!=state){attendanceState=state;++stateRevision;}
-}
-bool storageReady=false, sessionValid=false;
-String sessionPath, attendanceMessage="[CERRADO] Pase tarjeta de docente.";
-uint32_t openedMs=0, lastCloseAttempt=0, clockAtMs=0;
-int64_t clockEpoch=0;
-
-void setAttendanceMessage(const String& text){
- attendanceMessage=text;++stateRevision;
-}
-uint32_t recordChecksum(const AttendanceRecord& r) {
- const byte* data=reinterpret_cast<const byte*>(&r);
- uint32_t hash=2166136261U;
- for(size_t i=0;i<offsetof(AttendanceRecord,checksum);++i){hash^=data[i];hash*=16777619U;}
- return hash;
-}
-bool validRecord(const AttendanceRecord& r) {
- if(r.magic!=0x52464944||r.version!=1||r.teacher<6||r.teacher>7||r.reason>2||r.checksum!=recordChecksum(r))return false;
- const byte allowed=PEOPLE[r.teacher].group==0?0x07:0x38;
- return (r.present&~allowed)==0;
-}
-bool saveRecord(const String& path,AttendanceRecord r) {
- r.checksum=recordChecksum(r);
- const String temp=path+".tmp";
- File f=LittleFS.open(temp,"w");
- if(!f)return false;
- const bool complete=f.write(reinterpret_cast<const byte*>(&r),RECORD_SIZE)==RECORD_SIZE;
- f.flush();f.close();
- if(!complete){LittleFS.remove(temp);return false;}
- // LittleFS atomically replaces an existing destination; never delete it first.
- return LittleFS.rename(temp,path);
-}
-bool readRecord(File& f,AttendanceRecord& r) {
- memset(&r,0,sizeof(r));
- return f&&f.size()==RECORD_SIZE&&f.read(reinterpret_cast<byte*>(&r),RECORD_SIZE)==RECORD_SIZE&&validRecord(r);
-}
-bool beginAttendanceStorage() {
- storageReady=false;sessionValid=false;setAttendanceState(AttendanceState::CLOSED);++stateRevision;
- if(!LittleFS.begin(false)) {setAttendanceMessage("[ERROR] No se pudo montar LittleFS. No se formateó.");return false;}
- if(!LittleFS.exists("/sessions")&&!LittleFS.mkdir("/sessions"))return false;
- File dir=LittleFS.open("/sessions");if(!dir||!dir.isDirectory())return false;
- File f=dir.openNextFile();
- while(f){
-  if(!f.isDirectory()&&String(f.name()).endsWith(".bin")){
-   const String path=f.path();AttendanceRecord r;
-   const bool ok=readRecord(f,r);f.close();
-   if(!ok){setAttendanceMessage("[ERROR] Registro dañado; no se borró: "+path);return false;}
-   if(r.reason==0){r.reason=2;r.closed=0;if(!saveRecord(path,r)){setAttendanceMessage("[ERROR] No se pudo conservar el cierre por reinicio.");return false;}}
-   if(!sessionValid||r.opened>currentRecord.opened||(r.opened==currentRecord.opened&&r.nonce>currentRecord.nonce)){
-    currentRecord=r;sessionPath=path;sessionValid=true;
-   }
-  }else f.close();
-  f=dir.openNextFile();
+bool sessionValid=false,sessionActive=false;
+size_t sessionTeacher=0;
+bool present[PERSON_COUNT]={};
+uint32_t openedMs=0;
+String attendanceMessage="[CERRADO] Pase tarjeta de docente.";
+void setAttendanceMessage(const String& text){attendanceMessage=text;++stateRevision;}
+void tickAttendance(){
+ if(sessionActive&&uint32_t(millis()-openedMs)>=SESSION_MS){
+  sessionActive=false;setAttendanceMessage("[CERRADO] Asistencia cerrada.");
  }
- storageReady=true;
- if(sessionValid)setAttendanceMessage(currentRecord.reason==2?"[CERRADO] Sesión interrumpida por reinicio; presentes conservados.":"[CERRADO] Última sesión conservada.");
- return true;
 }
-int64_t epochNow() {return clockEpoch?clockEpoch+(millis()-clockAtMs)/1000:0;}
-String timestamp(int64_t epoch) {
- if(!epoch)return "";
- time_t t=static_cast<time_t>(epoch);struct tm value;localtime_r(&t,&value);
- char out[32];strftime(out,sizeof(out),"%Y-%m-%dT%H:%M:%S-03:00",&value);
- return String(out);
-}
-String recordJson(const AttendanceRecord& r) {
- String s; s.reserve(1024);s="{\"teacherId\":";s+=jsonString(PEOPLE[r.teacher].id);s+=",\"teacher\":"+jsonString(PEOPLE[r.teacher].name);
- s+=",\"class\":"+jsonString(CLASSES[PEOPLE[r.teacher].group]);
- s+=",\"openedAt\":"+jsonString(timestamp(r.opened))+",\"closedAt\":"+jsonString(timestamp(r.closed));
- s+=",\"closeReason\":"+jsonString(r.reason==0?"OPEN":r.reason==1?"TIMEOUT":"DEVICE_RESTART");
- s+=",\"presentStudents\":[";
- bool first=true;
- for(byte i=0;i<6;++i)if(r.present&(1<<i)){
-  if(!first)s+=",";
-  first=false;
-  s+="{\"id\":"+jsonString(PEOPLE[i].id)+",\"name\":"+jsonString(PEOPLE[i].name)+",\"scannedAt\":"+jsonString(timestamp(r.scanned[i]))+"}";
- }
- return s+"]}";
-}
-void tickAttendance() {
- if(!isSessionActive()||millis()-openedMs<SESSION_MS)return;
- if(isClosePending()&&millis()-lastCloseAttempt<5000)return;
- lastCloseAttempt=millis();
- AttendanceRecord finished=currentRecord;finished.reason=1;finished.closed=finished.opened+600;
- if(!saveRecord(sessionPath,finished)){
-  setAttendanceState(AttendanceState::CLOSE_PENDING);setAttendanceMessage("[ERROR] Ventana cerrada; se reintentará guardar el cierre.");return;
- }
- currentRecord=finished;setAttendanceState(AttendanceState::CLOSED);
- setAttendanceMessage("[CERRADO] Asistencia cerrada automáticamente; registros conservados.");
-}
-void attendanceScan(const String& card) {
+void attendanceScan(const String& card){
  tickAttendance();
  const int person=personByCard(card);
- if(!storageReady){setAttendanceMessage("[ERROR] Almacenamiento no disponible.");return;}
- if(isClosePending()){setAttendanceMessage("[ERROR] Cierre pendiente de guardar; no se admiten registros.");return;}
  if(person<0){setAttendanceMessage("[ERROR] Tarjeta no registrada.");return;}
- if(!isSessionActive()){
+ if(!sessionActive){
   if(!PEOPLE[person].teacher){setAttendanceMessage("[CERRADO] Solo un docente puede abrir la clase.");return;}
-  if(!clockEpoch){setAttendanceMessage("[ERROR] Sincronizar la hora antes de abrir asistencia.");return;}
-  AttendanceRecord created;memset(&created,0,sizeof(created));
-  created.magic=0x52464944;created.version=1;created.teacher=person;created.opened=epochNow();
-  String path;
-  do {created.nonce=esp_random();path="/sessions/"+String(static_cast<unsigned long>(created.opened))+"-"+String(created.nonce,HEX)+".bin";}while(LittleFS.exists(path));
-  if(!saveRecord(path,created)){setAttendanceMessage("[ERROR] No se pudo crear la sesión.");return;}
-  currentRecord=created;sessionPath=path;sessionValid=true;setAttendanceState(AttendanceState::OPEN);openedMs=millis();
+  memset(present,0,sizeof(present));sessionTeacher=person;openedMs=millis();sessionActive=sessionValid=true;
   setAttendanceMessage("[OK] Clase abierta: "+String(CLASSES[PEOPLE[person].group]));return;
  }
  if(PEOPLE[person].teacher){setAttendanceMessage("[ERROR] Ya hay una sesión abierta; no se reemplazó.");return;}
- if(PEOPLE[person].group!=PEOPLE[currentRecord.teacher].group){setAttendanceMessage("[ERROR] Estudiante de otra clase.");return;}
- if(currentRecord.present&(1<<person)){setAttendanceMessage("[OK] Ya estaba registrado; no se duplicó.");return;}
- AttendanceRecord updated=currentRecord;updated.present|=1<<person;updated.scanned[person]=epochNow();
- if(!saveRecord(sessionPath,updated)){setAttendanceMessage("[ERROR] No se pudo guardar; volver a pasar la tarjeta.");return;}
- currentRecord=updated;setAttendanceMessage("[OK] Alumno registrado: "+String(PEOPLE[person].name));
+ if(PEOPLE[person].group!=PEOPLE[sessionTeacher].group){setAttendanceMessage("[ERROR] Estudiante de otra clase.");return;}
+ if(present[person]){setAttendanceMessage("[OK] Ya estaba registrado; no se duplicó.");return;}
+ present[person]=true;setAttendanceMessage("[OK] Alumno registrado: "+String(PEOPLE[person].name));
 }
-String attendanceJson() {
- const bool open=isSessionActive()&&millis()-openedMs<SESSION_MS;
- String s; s.reserve(1400);s="{\"storageReady\":";s+=String(storageReady?"true":"false");s+=",\"clockReady\":"+String(clockEpoch?"true":"false");
- s+=",\"active\":"+String(open?"true":"false")+",\"closePending\":"+String(isClosePending()?"true":"false");
- s+=",\"message\":"+jsonString(attendanceMessage);
- s+=",\"remainingSeconds\":"+String(open?(SESSION_MS-(millis()-openedMs)+999)/1000:0);
- s+=",\"session\":"+String(sessionValid?recordJson(currentRecord):"null");
- return s+"}";
-}
-void synchronizeClock() {
- if(isSessionActive()){reply(409,"No se cambia la hora durante una sesión.");return;}
- const String text=server.arg("epoch");char* end;
- const long long epoch=strtoll(text.c_str(),&end,10);
- if(end==text.c_str()||*end||epoch<1704067200LL||epoch>4102444800LL){reply(400,"Fecha inválida.");return;}
- clockEpoch=epoch;clockAtMs=millis();++stateRevision;reply(200,"Hora sincronizada (Uruguay, UTC-3).");
-}
-void initializeStorage() {
- if(storageReady||isSessionActive()){reply(409,"No se permite formatear un almacenamiento montado o una sesión abierta.");return;}
- if(server.arg("confirmation")!="INICIALIZAR"){reply(400,"Se requiere confirmación explícita: INICIALIZAR. Puede borrar datos previos.");return;}
- if(!LittleFS.format()||!beginAttendanceStorage()){reply(500,"No se pudo inicializar LittleFS.");return;}
- reply(200,"Almacenamiento preparado.");
-}
-void exportAttendance() {
- if(!storageReady){reply(503,"Almacenamiento no disponible.");return;}
- server.sendHeader("Cache-Control","no-store");
- server.sendHeader("Content-Disposition","attachment; filename=asistencias.ndjson");
- server.setContentLength(CONTENT_LENGTH_UNKNOWN);
- server.send(200,"application/x-ndjson; charset=utf-8","");
- tickAttendance();
- File dir=LittleFS.open("/sessions");File f=dir.openNextFile();
- while(f){
-  tickAttendance();
-  if(!server.client().connected()){f.close();break;}
-  if(!f.isDirectory()&&String(f.name()).endsWith(".bin")){
-   AttendanceRecord r;
-   if(readRecord(f,r)){
-    // A deadline may atomically replace this file while its old handle is open.
-    if(sessionValid&&sessionPath==String(f.path()))r=currentRecord;
-    server.sendContent(recordJson(r)+"\n");
-   }else server.sendContent("{\"error\":\"Registro dañado\"}\n");
-  }
-  f.close();tickAttendance();yield();f=dir.openNextFile();
+String attendanceJson(){
+ const uint32_t elapsed=millis()-openedMs;
+ const bool open=sessionActive&&elapsed<SESSION_MS;
+ String s="{\"active\":"+String(open?"true":"false")+",\"message\":"+jsonString(attendanceMessage);
+ s+=",\"remainingSeconds\":"+String(open?(SESSION_MS-elapsed+999)/1000:0)+",\"session\":";
+ if(!sessionValid)return s+"null}";
+ size_t capacity=0;
+ for(const auto& p:PEOPLE)if(!p.teacher&&p.group==PEOPLE[sessionTeacher].group)++capacity;
+ s+="{\"teacherId\":"+jsonString(PEOPLE[sessionTeacher].id)+",\"teacher\":"+jsonString(PEOPLE[sessionTeacher].name)+",\"class\":"+jsonString(CLASSES[PEOPLE[sessionTeacher].group]);
+ s+=",\"capacity\":"+String(capacity)+",\"presentStudents\":[";
+ bool first=true;
+ for(size_t i=0;i<PERSON_COUNT;++i)if(present[i]){
+  if(!first)s+=",";
+  first=false;
+  s+="{\"id\":"+jsonString(PEOPLE[i].id)+",\"name\":"+jsonString(PEOPLE[i].name)+"}";
  }
- tickAttendance();
- server.sendContent("");
- tickAttendance();
+ return s+"]}}";
 }
-
 void sendStatus(){
  server.sendHeader("Cache-Control","no-store");
  server.send(200,"application/json; charset=utf-8",commonStatus("rfid")+",\"attendance\":"+attendanceJson()+"}");
 }
 void prepareWrite(){
+ if(!requireAdmin())return;
  if(operationBusy()){reply(409,"Hay una operación pendiente.");return;}
  const int person=personById(server.arg("personId"));
- if(person<0){reply(400,"Solo se admiten las ocho personas fijas.");return;}
+ if(person<0){reply(400,"La persona no está definida en el firmware.");return;}
  if(server.arg("confirm")!="yes"){reply(400,"Falta confirmar la sobrescritura.");return;}
  if(!checkReader(true)){reply(503,"El RC522 no responde.");return;}
  beginAttempt("ESCRITURA");
@@ -651,27 +511,28 @@ void prepareWrite(){
  report("ESPERANDO_TARJETA","Acercar tarjeta para "+String(PEOPLE[person].name)+" // "+requestedId);
  reply(202,"Escritura preparada.");
 }
-void writeSelectedCard() {
+bool writeSelectedCard() {
   if(!validCardId(requestedId)){
-    report("ERROR_ESCRITURA","Card ID inválido; no se escribió la tarjeta.");return;
+    report("ERROR_ESCRITURA","Card ID inválido; no se escribió la tarjeta.");return false;
   }
   describeCard();
-  if (!authenticate()) return;
+  if (!authenticate()) return stage!="TIPO_NO_COMPATIBLE";
 
   byte previous[16];
   report("LECTURA_PREVIA", "Leyendo el bloque 4 antes de modificarlo.");
-  if (!readBlock(previous)) return;
+  if (!readBlock(previous)) return true;
   report("CONTENIDO_PREVIO", blockHex);
 
   byte desired[16] = {0};
   memcpy(desired,requestedId.c_str(),requestedId.length());
   expectedHex = hexBytes(desired, sizeof(desired));
   report("ESCRIBIENDO", "Sobrescribiendo solamente el bloque de datos 4.");
+  if(uint32_t(millis()-armedAtMs)>=WRITE_TIMEOUT_MS){report("TIEMPO_AGOTADO","Terminó el plazo antes de escribir.");return false;}
   const auto status = rfid.MIFARE_Write(DATA_BLOCK, desired, sizeof(desired));
   if (status != MFRC522::STATUS_OK) {
     report("ERROR_ESCRITURA", "No se confirmo la escritura. Comprobar la tarjeta con el lector. " +
            String(rfid.GetStatusCodeName(status)));
-    return;
+    return false;
   }
 
   byte actual[16];
@@ -686,24 +547,20 @@ void writeSelectedCard() {
     report("ESCRITURA_OK", "Card ID escrito y verificado: " + cardId +
            ". Retirar la tarjeta antes de usarla para asistencia.");
   }
+  return false;
 }
-
 
 void sendPage(){
  server.sendHeader("Cache-Control","no-store");server.send_P(200,"text/html; charset=utf-8",PAGE);
 }
 
 void setup(){
- setenv("TZ","UYT3",1);tzset();
- beginHardware("RFID-ESP32");beginAttendanceStorage();
+ beginHardware("RFID-ESP32");
  server.on("/",HTTP_GET,sendPage);
- server.on("/admin",HTTP_GET,sendPage);
- server.on("/admin/",HTTP_GET,sendPage);
+ server.on("/admin",HTTP_GET,[]{if(requireAdmin())sendPage();});
+ server.on("/admin/",HTTP_GET,[]{if(requireAdmin())sendPage();});
  server.on("/api/write",HTTP_POST,prepareWrite);
  server.on("/api/status",HTTP_GET,sendStatus);
- server.on("/api/time",HTTP_POST,synchronizeClock);
- server.on("/api/storage/init",HTTP_POST,initializeStorage);
- server.on("/api/attendance/export",HTTP_GET,exportAttendance);
  registerCommonRoutes();server.onNotFound([]{reply(404,"Ruta inexistente.");});server.begin();
 }
 void finishOperation(const char* code,const char* text){
@@ -742,7 +599,9 @@ void pollCard(bool connected){
  lastCardUid=uid;
  if(!manual)beginAttempt("ASISTENCIA");
  if(isWritePending()){
-  setOperation(OperationState::WRITING);writeSelectedCard();
+  setOperation(OperationState::WRITING);
+  const bool retry=writeSelectedCard();
+  if(retry){releaseCard();setOperation(OperationState::WAIT_WRITE);return;}
  }else if(readSelectedCard()&&!manual){
   attendanceScan(cardId);trace+="[ASISTENCIA] "+attendanceMessage+"\n";
  }
